@@ -55,6 +55,8 @@ from .util import (
     _safe_str,
 )
 
+import os #for debugging
+
 _ARCHS4_CACHE: dict[str, Any] = {}
 _OSDR_QUERY_CACHE: dict[str, Any] = {}
 
@@ -582,6 +584,9 @@ def run_real_retrieval(
             normalized = _enrich_hits_from_ncbi_eutils(normalized, _safe_str(entrez_email))
 
         normalized = normalized.sort_values("score", ascending=False).reset_index(drop=True)
+
+        
+
         return normalized
 
 
@@ -598,6 +603,7 @@ def search_hits(
     caller shows the mode, because it is the difference between a half-second
     answer annotated from the local cache and a 22-second subprocess.
     """
+    
     row = samples_df.loc[samples_df["sample_id"] == sample_id]
     if row.empty:
         raise ValueError(f"Unknown sample_id: {sample_id}")
@@ -605,11 +611,21 @@ def search_hits(
     sample_name = _safe_str(sample_row["sample_name"])
 
     if cached_query_vector(sample_id) is not None:
+
+        
+
         hits = run_cached_query_retrieval(sample_id=sample_id, topk=topk)
         # The cache has no study summaries or PubMed links. Fill them only when
         # asked, since it is a network round trip per accession.
         if enable_biopython_metadata and _safe_str(entrez_email):
             hits = _enrich_hits_from_ncbi_eutils(hits, _safe_str(entrez_email))
+
+        #save 100 hits dataframe to a parquet to look at seperately in a seperate folder for topic modeling to have dummy file
+        #change later to integrate with rest of app for visual outputs)
+            
+        hits.to_parquet(f'archs4metadata/{sample_id}_archs4_top{topk}hits_metadata.parquet')
+        hits.to_csv(f'archs4metadata/{sample_id}_archs4_top{topk}hits_metadata.csv',index=False)
+
         return hits, "cached"
 
     q_file = _find_precomputed_query_embedding_file()
