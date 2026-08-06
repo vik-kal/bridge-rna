@@ -6,6 +6,299 @@ Update after each meaningful change so another session can resume without losing
 This file used to track Bridge Manifold alone.
 The two repositories were merged on 2026-07-22 and it now covers the whole product; entries before that date describe the map half.
 
+## 2026-08-06 (result stability is measured on the query that ran, not looked up)
+
+**The rail's confidence number is gone, and the honest version replaced it on the right.**
+`cohorts.STABILITY_BY_K` was a bucketed curve of leave-one-out top-5 agreement against cohort size, measured offline over all 212 cohorts, and it was quoted on the cohort card the moment a cohort was selected.
+Every number in it was real and the label was accurate, and it still misled, because a population average printed beside one cohort's name is read as a property of that cohort.
+The sd column was the tell: at 0.18 within the 5-9 bucket, "0.72" covers real cohorts measuring 0.316 and 0.849.
+Measured on the live app, OSD-137's two 6-animal liver arms score **0.59** and **0.64**, and the curve told both of them 0.72.
+
+What replaced it is the same statistic, computed during the search over this cohort's own leave-one-out pools, **at the depth the slider is on** rather than at a fixed 5.
+Beside it, measured the same way in the same pass, is what one of those animals alone would have agreed with another, which is what replaced the fixed `SINGLE_SAMPLE_STABILITY = 0.16` and is what makes the headline readable.
+The member whose absence moves the list furthest is named, because that is the per-member half of a mean and it points at an animal.
+
+**It cost one memmap pass, which is the whole reason it is affordable.**
+`retrieval._topk_cosine_matrix` is now the single implementation of the cosine scan in the repository: `_topk_cosine_from_memmap` is a one-row wrapper over it, and `validate_cohorts.py`'s `QueryBatch` had its own near-identical copy deleted in favour of calling it with a progress hook.
+Measured against the real 963 MB memmap: 0.44 s for 1 query vector, 0.50 s at 11, 1.00 s at 77, which is the worst case a 38-animal cohort can produce.
+The read and the float16 normalization dominate; the queries are nearly free.
+Verified before the swap that the fused scan reproduces the old standalone scan exactly - identical top-30 in order, max score difference 0.0 - and the full validator run afterwards returns the same science numbers as before (0.738 / 0.161 / 4.6x, all six checks passing over all 212 cohorts).
+
+**Two things about where it sits are load-bearing.**
+A measured number cannot live under the picker, because it does not exist until the query runs: putting it there would mean either a memmap pass per dropdown change or the previous cohort's figure under the current cohort's name, which is worse than the curve was.
+And the panel sits *above* the inspector rather than inside it, so clicking a hit does not scroll away the number describing the whole result.
+A comparison gets one block per arm, because an overlap of 0.25 between two arms at 0.86 is a different finding from 0.25 between one at 0.86 and one at 0.31.
+
+**What survives.**
+`LOW_N_THRESHOLD` is still 5 and still comes from that curve, because "how large should a cohort be" is the question a population average can answer honestly, and the picker is the one place where size is all that is known.
+`validate_cohorts.py` check 5 still measures the curve and now fails if the knee moves - but only on a **full** sweep. A first attempt failed the build on a `--cohorts 40` run whose knee landed at 10, from buckets standing on one cohort each, which is exactly the noise the bucketing exists to survive.
+`STABILITY_FLOOR = 0.70` is that same 0.70, applied to the measurement instead of to size standing in for it, and it is what turns the amber flag on.
+
+**Fitting two measurements on screen took three goes, and the browser check is what caught it.**
+The first panel labelled every block "RESULT STABILITY", restated the full definition under each number, and added a three-line amber caution: fine for one cohort, and on a comparison the two blocks wanted 644 px inside a panel that had 389, so cohort B's whole measurement sat below the fold. A second measurement nobody can see is a second measurement nobody made.
+Fixed by saying the shared parts once in the heading and subtitle, cutting the caution to one line, and giving `.details-panel` `flex-shrink: 20` against the stability panel's 1 - with equal factors the two split the overflow and the panel that mattered lost 165 px it needed.
+The check that found it reads both bounding boxes after a two-arm search and asserts the second block ends inside the panel; it failed twice more while the fix was tuned, which is the whole argument for asserting on geometry rather than on presence.
+
+**One real bug came out of an adversarial review of the diff** (10 findings survived refutation out of 39, and most of the rest were stale doc prose).
+`StabilityMeasurement.gain` guards only a baseline of exactly zero, but the panel printed the baseline at two decimals, so a cohort whose members share almost nothing alone read "one alone agrees with another 0.00 of the time, a 340.0x gain" - a sentence that contradicts itself. `panels._share` prints three decimals below 0.005 instead of suppressing the ratio, because a near-zero baseline is exactly the case where the gain is most worth stating.
+The review also caught that `REFERENCE.md`'s per-file test table had been stale independently of this work: it listed `test_app.py` at 63 against an actual 76 and summed to 290 while its own headline said 307. Regenerated from `--collect-only`.
+
+**Tests.** 330 pytest (up 23) and 146 cohort browser checks (up 22), plus a `--loops` flag on `e2e_cohort_check.py` that reruns the whole suite against one warm server.
+Two passes were run and produced byte-identical measurements, which is what a state-carried-between-runs bug would have broken.
+The load-bearing unit test is the one that scores every leave-one-out pool the slow and obvious way, one scan each, and requires the fused path to agree.
+One finding worth keeping: a batch of queries and a single query agree to about 1.3e-07 rather than bit for bit, because one is a BLAS matrix-matrix product and the other a matrix-vector product. That is a couple of float32 ulps, and it is the same effect check 1 of the validator documents.
+Design, measurements and rejected alternatives: `docs/live_stability.md`.
+
+**Hosted on 8050 and checked against the running instance rather than against a suite.**
+The port was already occupied by a server from 01:10 that morning, serving pre-change code and looking perfectly healthy - the second time that has happened, and the reason last session's entry says a green e2e proves the code works rather than that the hosted process runs it.
+It was replaced and the new instance verified directly: the rail card states the pooled size and nothing else, no stability panel exists before a search, and one appears after it with a measured 0.59 on a 2.4 s query.
+
+**One upload browser check was failing, and the bug was in the assertion rather than in the app.**
+`e2e_upload_check.py` asserted that after its server is SIGTERMed the next run reaps the abandoned staging directory and **none is left**. Two directories existed at that point, and the second belonged to a live PID, so the reaper skipped it and the check failed.
+Twice I concluded it reproduced "in isolation" and twice I was wrong: `pytest tests/ -q` was running alongside, and two upload tests call `_stage_upload`, so the suite holds a staging directory of its own for as long as it runs. Watching the temp directory and printing each new one's owner named the culprit in one line - `Python -m pytest tests/ -q`. Run genuinely alone, all 39 checks passed.
+So the reaper was doing exactly what it documents: a live owner's directory must survive, because PID reuse can only make a dead directory look alive and delay cleanup by one run, and must never let one process delete another's staged file.
+The check now asserts the guarantee instead of a proxy for it - every directory whose owner is *gone* is reaped, and none whose owner is gone survives - and it names each directory, its PID and whether that PID lives, because "reaped 1, 1 left" was not a diagnosis. Verified by running the upload suite with pytest looping against it throughout, which is what used to break it.
+The transferable lesson is the cheap one: "I ran it in isolation" is a claim to check, not to assert. Both times the confounding process was one I had started myself in the same message.
+
+## 2026-08-06 (merged to main, hosted locally, and the meeting Q&A corrected)
+
+No new features. This session integrated the branch below, stood the app up, and fixed a document that had gone false.
+
+**`map-key-and-cohort-copy` merged into `main` and pushed**, as merge commit `c9b79c4`.
+The branch was exactly one commit ahead of `main` and `main` was not ahead of it, so there was nothing to reconcile.
+307 tests passed on the branch and 307 passed again on the merged tree, which is the run that counts.
+All 242 browser checks pass on the merged code as well: 50 in `e2e_check.py`, 124 in `e2e_cohort_check.py`, 68 in `e2e_upload_check.py`, with zero console errors in each.
+
+**Hosting is local and deliberately stays local.**
+Cloud hosting was scoped before being declined, and the constraint is worth recording for whoever asks again: the map alone needs about 81 MB of artifacts, but retrieval needs the 963 MB ARCHS4 memmap resident enough to be scanned per query, which puts a real deployment at roughly 1.1 GB and 2-4 GB of RAM before the upload path adds torch and a 547 MB checkpoint.
+`flyctl` is installed and authenticated and `gh` is authenticated, but there is no Docker daemon on this machine and `hf` is not logged in, so Fly with a remote builder was the only option that needed no new account.
+The decision was to run locally instead, so none of that was built.
+The app serves at `http://127.0.0.1:8050`, which is the argument parser's default and does not cross a network.
+
+**Two orphaned app processes were found still running.**
+One had held port 8050 for eight and a half hours, from the previous afternoon, which meant it was serving pre-merge code while looking exactly like a healthy server.
+It was stopped so the canonical port could serve the merged tree; a second orphan on port 8061 was left alone.
+This is worth watching for: `app.py` started in the background survives the session that started it, and a stale instance answers 200 on both routes.
+
+**The hosted process was verified directly rather than by proxy.**
+Each e2e suite boots its own server, so passing suites say the code works, not that the running instance does.
+One real query driven through the browser against the live process returned 5 hits in 0.9 seconds, which matches the documented cached-path timing, with the banner correctly naming the precomputed path, and `/map` drew all 942,563 glyphs in 1.8 seconds.
+
+**`MEETING_QA.md` was committed, but five of its answers had to be rewritten first.**
+It was written against the codebase as it stood at the meeting, and file ingestion and cohort pooling have both shipped since, so answers stating that neither existed were not stale but false.
+Committing it as found would have put "no upload feature exists yet" into a repository where that feature has a design doc, an e2e suite, and a verified cosine 1.0 round trip.
+The rewritten answers are marked as changed rather than silently corrected, so the document still reads as a record of what was asked.
+
+**One correction caught before it shipped, which is the transferable part.**
+The rewritten upload-security answer initially claimed the app does not bound upload size.
+It does: `MAX_UPLOAD_BYTES` is 200 MB, enforced both as Flask's `MAX_CONTENT_LENGTH` (`app.py:262`) and again after the base64 decode (`bridge_rna/callbacks.py:1004`).
+The claim was written from the shape of the code rather than from the code, which is exactly the failure this repository's documents are otherwise good at avoiding.
+
+**Two suspected interface defects were investigated and both were deliberate.**
+The projection readout's trailing separator on a wrapped line is a documented choice: `map.css:97-104` explains that binding the separator to the following chip instead would strand a `·` at the start of every wrapped line.
+The inspector appearing to say "Run a search" after a search had run was an artifact of screenshotting before the callback settled; it resolves to the query's own details within 1.5 seconds.
+Neither was changed, which is the right outcome for a check that finds nothing.
+
+## 2026-08-06 (the map keys every mark it draws; both pooled queries get described)
+
+A copy pass over both views, plus one design change and two defects the audit behind it turned up.
+Full design document: `docs/map_key.md`.
+
+**Seven sentences deleted from the interface.**
+"Not a difference vector." / "Nothing is dropped for you." / the three-line metadata-enrichment cost note / "Colours all 942,563 points." / the Tissue color-by's anatomical-vocabulary paragraph / "One glyph per sample; zoom re-samples the visible window." / "Each glyph is a pooled member; the query itself is a mean of them and has no position here."
+Each was either a fact the control already carried, a reassurance against a fear the interface never raised, or a definition-by-negation aimed at a suspicion nobody had.
+The long map caveat about cosine rank went too; its last sentence was kept and rewritten to stand alone: "Hover a hit for its rank in the search and its rank on the map. The two disagree: this is a projection of 512 dimensions into two."
+`test_the_removed_copy_stays_removed` pins all of them, because prose regresses silently and nothing else in the suite would notice a paragraph coming back.
+
+**The map view spells `color`.** Strings, comments and identifiers, including `_colour_plan` -> `_color_plan`. This was drift rather than a choice: the package is `colorby.py`, the control is `#color-by`, the functions were already `color_for_index` and `covers_corpus`. `test_the_map_view_spells_color_the_american_way` keeps it.
+
+**The floating legend became the map's key.**
+With a comparison drawn the map carries four encodings at once - corpus glyph hue, member fill hue, hit ring shape, corpus glyph shape - and it explained one.
+Ring shape had no key anywhere, which is the worst of the four: in a comparison the hits outnumber the members and are the thing the feature exists to show.
+Neither did the diamond that has meant "one of the 2,108 spaceflight samples" since the map was built.
+The panel now runs retrieval key / color list / corpus shape footer, ordered by how transient each is, and only the color list scrolls.
+
+**A comparison's key is grouped by role, not by cohort.** The two member rows sit adjacent and differ only in hue; the two hit rows sit adjacent and differ only in shape. The reader sees each channel vary with the other held fixed, so the layout is the explanation and the sentence that used to assert it could be deleted rather than reworded. Grouping by cohort was built first and buries exactly that.
+Shapes are CSS, **hues come from `theme` inline** - which removes the last place a cohort hue was written twice, since the rail's swatches had mirrored both hexes into `map.css` by hand.
+The key follows the plot into 3-D, where a member is a diamond because `Scatter3d` rejects `star`.
+The rail keeps one line of tick feedback; the swatch key and its paragraph are gone.
+
+**Both pooled queries are now described.** Arming a comparison ran a second independent pooled query whose size and stability were stated nowhere, while the network and the map both gave it a color. `STABILITY_BY_K` is a function of size, so an overlap of 0.25 between a cohort of 12 at 0.81 and one of 2 at 0.34 is not the same finding as 0.25 between two cohorts of 12 - and the number that decides which it is was off screen. Each query now carries a card under its own picker, with a role line and the contrast facet, only when there are two.
+
+**Two defects, neither in scope, both found by auditing marks against explanations.**
+*3-D silently discarded the OSDR overlay's diamond and its white ring* - `_scatter`'s `Scatter3d` branch passed no `symbol` and hard-coded `line=dict(width=0)`, so 2,108 spaceflight samples arrived as plain circles in the same palette hue as the 940,455 beneath them, contradicting `render.py`'s own docstring. `test_osdr_markers_are_visually_distinct_from_the_cloud` missed it because it only ever ran `("pca", "2d")`. This was a prerequisite for the corpus key, not a bonus: a key asserting a diamond 3-D does not draw is worse than the silence it replaced.
+*A hit retrieved by both cohorts named one arm on hover.* Two traces at one coordinate, one tooltip per position - so for exactly the points a comparison exists to show, one arm's rank and cosine were unreachable, while `render.py` justified dropping the rank numerals on the grounds that the hover said more. A pre-pass now indexes each drawn point by the cohorts that retrieved it. The **marks** stay emergent; only the hover reads across the arms.
+
+**Two bugs of my own that only a screenshot caught.** The divider under the retrieval key was `.bm-key:not(:last-child)`, which can never fire - each key is the only child of its own slot. Rewritten as a modifier class, it then landed on one of the two return statements, because the comparison branch returns from a different indent. Both key tests now assert it. Neither failure was visible to any assertion.
+
+Tests: 307 unit (was 290), 242 browser checks (was 205) - 50 map, 68 upload, 124 cohort. All passing.
+
+**Open, not addressed:** the header subtitle reads "NASA spaceflight transcriptomes, against all of Earth's" and ends without an object. It has been that way since the merge commit and is not a regression, but it reads as a truncation. Left alone because it is the product's tagline and rewriting it is an editorial call, not a bug fix.
+
+## 2026-08-05, later (cohort UX narrowed, and the comparison reaches the map)
+
+Four changes, two of them removals, plus two bugs that the work uncovered rather than caused.
+
+**The facet registry is down to three: study, tissue, spaceflight arm.**
+Sex, strain, genotype, habitat, mission duration and diet are deleted.
+They were offered because `cache/osdr_metadata.parquet` already carried them, which is not a reason.
+Every one of them could only ever *split* a cohort, and `STABILITY_BY_K` is a function of size (0.51 at k=3 against 0.81 at k=10), so the six controls did nothing but trade away the quantity pooling exists to buy - in exchange for a contrast the two-arm comparison answers attributably.
+Nine chips of which six were off also read as a definition you are expected to tune rather than as the curated ISA-Tab grouping OSDR publishes.
+Re-adding one is a single line in `FACETS`; nothing else hard-codes a facet, which the deletion confirmed by touching no other source file.
+
+**`R̄` is gone from the cohort card and the inspector.**
+Across all 212 real cohorts its median is 0.9991 and it is no lower at k=2 than at k=30, so it never separated a group worth trusting from one that was not, while a number pinned within a thousandth of its maximum sitting beside one that genuinely varies is read as a grade.
+`resultant_length` is deleted rather than left unused; the measurement stays in `docs/cohort_pooling.md`.
+The **per-member** leave-one-out cosine and the outlier flag stay: that statistic varies within a cohort, names an individual animal, and is what the exclude checkbox acts on.
+
+**A comparison now draws both cohorts on the map.**
+It drew cohort A alone and said nothing about the other arm, which was an omission rather than a limitation - B's hits already carried `archs4_index`, and only its member list was missing from the payload.
+Three independent design passes (scientific honesty, visual legibility, the researcher's actual task) reached the same answer, and the same encoding.
+**Hue for members, ring shape for hits, rings always white.**
+Lifting the network's blue/warm/teal onto the map is dead on arrival: against the worst categorical tissue hue on `PLOT_BG` they measure 1.03, 1.00 and 1.07 to 1, which is the finding `theme.py` already records as the reason the ring is white.
+Gold `#ffc233` against teal `#0bab9f` is dE2000 43.4 normal and 31.7 at worst under simulated CVD, against the palette's 8.4 bar, and hue is safe on a member because a member is a filled mark whose white outline carries its contrast.
+Both hit symbols are in `Scatter3d`'s vocabulary, so 2-D and 3-D encode a hit identically.
+**A shared hit is emergent, never computed**: it is in both hit lists, so it gets both traces and draws as a ring inside a square, and the map's shared count therefore cannot drift from the banner's.
+The "Show it on the map" tick became one tick per cohort with a colour key under it, and framing follows the ticks.
+Rejected with reasons in `docs/cohort_retrieval.md` section 9: a convex-hull footprint (claims territory the cohort does not occupy, and invites area comparison across projections that preserve neither), connecting polylines (already rejected for the single-cohort overlay, and the reason survives doubling), a dedicated shared hue.
+
+**Three pre-existing defects fixed on the way.**
+The halo scaled with membership - every member carried a 46 px ring at 0.50 alpha, so a 38-animal cohort composited into a teal disc; alpha is now `0.50/sqrt(k)` floored at 0.14.
+Map rank was measured from `query_points[0]`, whichever animal came first in metadata order, and is now measured from the nearest member of the cohort that retrieved the hit.
+A B-only hit and the second query star both opened "No metadata found", because the inspector looked node ids up in cohort A's hits alone; the map offer counted A's hits alone too.
+
+**Two bugs the browser sweep found, both real and both user-facing.**
+
+*The router repainted every view on arrival, and raced the user.* `serve_layout` paints the requested view server-side, but `dcc.Location` publishes `pathname` once it mounts and Dash reads that as a change, so `prevent_initial_call` was not enough. Rebuilding the retrieval view reads the OSDR catalog, so the response landed a few hundred milliseconds after load and overwrote whatever had happened meanwhile: clicking Cohort on arrival opened the cohort panel and then closed it again, **6 times out of 6**, while the click's own callback had run and returned the right answer. `route-store` records what was painted, `app.navigation_for` is the decision, and it is split out of the callback so it can be tested without Dash plumbing. This also removes a full view rebuild from every navigation.
+
+*A refinement test had never tested anything.* `test_adding_a_facet_only_ever_splits` compared a partition with itself: the synthetic fixture corpus gives every study exactly one tissue and one arm, so all four facet combinations produce the same 12 cohorts on it. It ran green from the day it was written. It now runs the chain study -> +tissue -> +arm on the `two_arm_study` frame and asserts the sizes 1 -> 2 -> 6, so it cannot go quiet again.
+
+**An adversarial review of the branch found three defects in it, and they are worth recording because two were introduced by the fix for something else.**
+
+*The second query star crashed the inspector.* The branch added a `query2` case to `build_details_panel` precisely because clicking that star reported "No metadata found" - and the new branch called `_build_query_details(query_b)` with one argument against a signature whose `compact` has no default. TypeError, so the callback errors and the inspector silently keeps showing the previous node, which is worse than the message it replaced. The browser check counted the `query2` node without ever clicking it, so 286 green tests said nothing about it.
+
+*An uploaded search was announced on the map as "0 pooled cohort samples".* Rewriting `_retrieval_overlay` hoisted the `query_label` assignment out of the `if query_points:` guard that used to protect it, so any retrieval whose query has no coordinate - which is every uploaded one, since `UPLOAD|...` matches no `sample_key` - fell into the pooled branch with zero members. A strict regression from `main`, which produced an empty label and let the rail say "an OSDR sample".
+
+*The hover called a single query sample a "pooled member".* The new map-rank suffix was unconditional. It is now earned by k >= 2.
+
+Each has a test that fails without its fix. The lesson worth keeping is the shape of the first two: both are a *new branch added to fix a reported fault*, and neither was exercised by the check that reported the fault - one counted a node without clicking it, the other never ran the upload path against the changed function.
+
+**The map key follows the ticks, not the payload.** Unticking an arm left the key still listing it with a hit count. This map already holds that a key is read as "what am I looking at" rather than "what exists" - it is why the colour legend recounts itself per figure and drops an empty category - so the key now marks a hidden arm as not shown. It needed splitting into its own callback, because it has to read the ticks that `show_retrieval_group` writes.
+
+**The browser suites now count their own checks.** The documented totals were hand-written and had drifted - CLAUDE.md said 173 where REFERENCE.md said 202, and the cohort file's documented 60 was never an actual count of anything. Each `Checks` instance now reports what it ran.
+
+## 2026-08-05 (cohort retrieval built, validated on the real corpus, and shipped)
+
+`docs/cohort_pooling.md` had specified and measured this feature on 2026-07-30 and left it unbuilt.
+It is built now: a fifth query-vector source that pools an experimental group into one query, a Sample / Cohort / Upload switch on the retrieval rail, an optional two-arm comparison, and `precompute/validate_cohorts.py` as the honesty gate.
+Design and every measurement: `docs/cohort_retrieval.md`.
+
+**A cohort is study x tissue x spaceflight arm by default, and the user can retune it.**
+That is the ISA-Tab factor grouping OSDR already curates: 212 cohorts with two or more members across 70 studies, median 10, max 38, grouping 2,105 of the 2,108 embedded samples.
+Three facets are offered as chips: study, tissue and spaceflight arm. (Six more were offered at first - sex, strain, genotype, habitat, duration, diet - and were removed on 2026-08-05; see that entry.)
+**Study is pinned and cannot be unticked**, because random samples from one study already reach 0.9805 mean pairwise cosine against 0.9933 for a real cohort, so pooling across studies would average across the corpus's strongest batch boundary.
+
+**The case for the feature is stability, not outlier protection, and it is now measured over all 212 cohorts rather than a sample.**
+Pooled leave-one-out top-5 agreement is **0.738** against **0.161** for a single sample, a **4.6x** gain.
+Against a structure-free null (k random OSDR samples) at 0.331, the cohort definition is worth **+0.407**.
+Against a within-study null at 0.683, tissue and arm are worth **+0.055** on top of the study, which is the uncomfortable number and is stated in the docs rather than buried: a pooled query is a cleaner measurement of "this study's samples" than of "this biology".
+
+**Three findings from building it that were corrections rather than choices.**
+
+*The identity check failed, and the reason was better than the check.* Pooling one sample normalizes it twice, so its query vector differs from the plain cached one by 7.45e-9 - a single float32 ulp, cosine 1.0 - and scores differ by 1.19e-7. That is enough to reorder: the first differing rank is 23, where the score gap to rank 24 is **exactly 0.0**. The two runs permute an exact tie. The gate is now float32 score agreement plus an identical top-20 in order, and the divergence depth is printed rather than hidden.
+
+*The stability-versus-k curve was noise at first.* Two cohorts per size gave 0.38 at k=5 beside 0.90 at k=6. Re-run over every cohort and bucketed, it is 0.34 / 0.51 / 0.55 / 0.72 / 0.81 / 0.86 for k = 2 / 3 / 4 / 5-9 / 10-14 / 15+. Even then 5-6 and 7-9 inverted by 0.04 against a within-bucket sd of 0.18, so `validate_cohorts.py` merges adjacent buckets that invert - a bigger cohort must never be reported as less trustworthy than a smaller one. `LOW_N_THRESHOLD` is 5 because that is the first bucket to reach 0.70, and a test pins the shipped curve monotone.
+
+*Two Dash callbacks were firing at page load.* Restyling the action slots on the initial call remounted the buttons inside them, and Dash fires a callback when an input component newly appears - so the cohort and upload searches both ran at `n_clicks: 0` and the canvas greeted every visitor with "Cohort retrieval failed". Fixed by giving the mode switch `prevent_initial_call` (the layout already renders the right initial state) plus an `n_clicks` guard in both callbacks. The browser suite now checks for it by name.
+
+**Interface.** The rail's two stacked query sources became a three-way tablist, so it is shorter than before rather than longer. The confidence card leads with **result stability** (a property of k, and the number that says how far to trust the list) and put `R̄` second and quieter. (`R̄` was removed on 2026-08-05; see that entry.) Low N is amber, not red, and names the measured number rather than the word "low". The member list shows each sample's leave-one-out cosine and lets you exclude one; nothing is ever auto-dropped. Excluding a member restates every number on the card.
+
+**The comparison runs two independent pooled queries, never a difference vector.** `centroid(flight) - centroid(ground)` is not a transcriptome, and the corpus-level version of it was already built and rejected (r = -0.990 with PC1). Only siblings differing in exactly one facet are offered, so the reported Jaccard overlap is attributable. Measured live: OSD-137 Liver Basal Control against Liver Ground Control share 2 of 8 retrieved samples, overlap 0.25.
+
+**The map draws every pooled member, not one point.** A cohort's query vector is a mean and no projection was fit on it, so there is no coordinate to draw for it; inventing one would be a lie. `_retrieval_overlay` carries `member_ids` and the renderer draws all of them, slightly smaller so a 38-animal cohort reads as a constellation.
+
+**Testing.** 258 unit tests (34 new), 202 browser checks (60 new in `tests/e2e_cohort_check.py`), and 6 corpus-scale checks in `precompute/validate_cohorts.py`, which scores 9,270 query vectors in one 73-second memmap pass. Two existing test helpers needed real fixes rather than workarounds: `tests/test_app.py` raised `TypeError` on pattern-matching dict ids and could not check them at all, and `tests/e2e_upload_check.py` had to learn to open the Upload tab.
+
+**Open.** The within-study margin of +0.055 is small and worth revisiting if the cohort definition is ever extended. `sibling_cohorts` offers tissue contrasts as well as arm contrasts, which is correct but was not the original intent, and it is worth watching whether users read a tissue overlap the same way.
+
+## 2026-07-30 (file ingestion verified in a browser loop; two defects fixed; cohort pooling measured)
+
+Three things, in order.
+
+**An example input file now ships.** `examples/osdr_upload_example.csv` is two real columns of OSD-100's counts matrix - one spaceflight eye, one ground control - with all 55,536 gene rows intact, 1.3 MB.
+Both columns are cached OSDR samples, which is the point: the file is simultaneously the format documentation, the E2E fixture, and its own correctness oracle, because an upload of either column must return exactly what the sample picker returns for that sample.
+`examples/README.md` states the contract, what is accepted, what is rejected and why, and the fact that **no metadata is required or accepted** - the query vector is a pure function of one counts column, so no metadata a user could supply would move a single hit.
+
+**File ingestion was driven in a real browser, in a loop.** `tests/e2e_upload_check.py`, a sibling of `e2e_check.py` and likewise not collected by pytest: 97 checks, about eight minutes, three cycles through one long-lived page.
+The loop is the design, not thoroughness theatre. A one-shot upload check passes on a page that leaks state between runs, so every fixture runs three times through the same page and every cycle must reproduce cycle 1 step for step, which it does.
+Correctness is anchored to the catalog path rather than to a golden file: uploaded FLT and GC columns must return the catalog's exact hits and scores for `OSD-100|...FLT_Rep1_M23` and `...GC_Rep1_M33`. Format variations (single-column, version-suffixed IDs, TSV, gzip) must all return that same answer; human Ensembl IDs, gene symbols, and a file with no sample columns must be rejected with their reason and draw nothing; and a valid upload straight after a rejection must be correct again.
+
+Two harness traps cost a run each and are worth recording. Dash 4 portals an open dropdown menu to a `.dash-dropdown-content` at the end of the body, so typing at the closed trigger is a **silent no-op** - the first version selected nothing and tested the same column twice while reporting success. And Playwright's `:text-is()` matches only the deepest element holding the text, so it never matches a `<label>` wrapping a `<span>`, which is exactly how Dash renders an option.
+
+**Two real defects, found by that testing and fixed.**
+
+*Staged uploads accumulated without bound.* Every upload wrote a `NamedTemporaryFile(delete=False)` that was never removed: one looped run left **32 files and 29 MB** in the system temp directory, and they outlived the process. Three bounds now hold it: staged files live in one process-owned directory removed at exit, a session's previous file is unlinked when its next upload arrives, and a directory abandoned by a killed process is reaped by the next run. Steady state is one file per active session; measured, ~30 uploads now leave 1 file where they left 30.
+The reaping is PID-tagged rather than signal-based, and the reason is worth keeping: `atexit` does not run on SIGTERM (how a supervisor stops a server) or SIGKILL, and a signal handler is not an option either, because uploads arrive on Dash's request threads and `signal.signal` may only be called from the main one. A first attempt did install a SIGTERM handler; it silently never fired for exactly that reason, and the E2E caught it. PID reuse can only make a dead directory look alive, delaying a cleanup - it can never remove a live server's file. `os.kill(0, 0)` addresses the process *group*, so PID 0 is excluded from the liveness probe explicitly, with a test.
+
+*The inspector claimed an OSDR study for uploaded samples.* `_build_osdr_query_metadata_block` ran unconditionally, so an uploaded sample rendered an "OSDR study" section repeating the "Uploaded file" study ID already shown under Identity, with a "Study title" that can never fill, and sent an OSDR lookup for a study that does not exist. It now returns nothing unless the study ID is a real accession.
+
+224 tests pass (was 219), 45 browser checks pass, 97 upload browser checks pass.
+
+**One observation, deliberately not acted on:** after a failed embed the network is replaced with "Embedding failed" while the inspector still describes the *previous* successful query, because the failure path returns `no_update` for `hits-store`. It is a mixed state. Clearing it would mean clearing `hits-store`, which lives on the shell so the map can draw a retrieval you ran before walking over to it - so this is a cross-view semantics decision, not a local fix, and it is Josh's call.
+
+**Cohort pooling was measured and specified, not built.** Full analysis in `docs/cohort_pooling.md`; the headline is that the measurements change why the feature is worth building.
+Mean pooling is exactly "average the members' cosine scores", weighted by L2 norm - so normalize each member first, because invariant 2 already establishes that norm is transcriptome concentration and not a nuisance scale. Averaging embeddings was checked against the biological alternative on five real cohorts: the pseudo-bulk embedding (counts summed, embedded live through `embed_upload.py`) sits **closer to the spherical centroid than the cohort's own members do**, in all five, so the centroid is not an off-manifold artifact.
+The premise needs correcting, though. Cohorts have almost no outlier problem - mean pairwise cosine 0.9933 against 0.8826 for random same-size groups - and yet **two replicates of the same cohort share on average 0.13 of their top-5 hits**, sometimes nothing at all. The cause is a scale mismatch: the entire top-500 of the 940,455-sample index spans a cosine range comparable to the gap between two animals in the same cage. Pooling raises leave-one-out top-5 stability from 0.13 to **0.78**, and that six-fold gain, not outlier protection, is the case for the feature.
+The caveat to carry: random samples from the same *study* already reach 0.9805, closing 84% of the distance to a real cohort, so most of a cohort's coherence is batch. A within-study null is the first thing to run before shipping.
+
+## 2026-07-26 (screenshot set, and the layout bug it exposed)
+
+Captured `screenshots/`, fourteen retina-scale PNGs (1680x1010 at 2x) of the real app driven end to end by Playwright against the real `cache/`: four of the retrieval view, ten of the map.
+The driver is `tests/screenshots.py`, a sibling of `e2e_check.py` - same harness, opposite purpose, one asserts and the other composes - named so pytest does not collect it, and it takes about ten minutes.
+The driver waits on facts the page reports about itself - glyph counts, banner text, a populated inspector - rather than on fixed sleeps, so a slow render produces a late screenshot instead of a blank one.
+The set is deliberately a walkthrough rather than a gallery: pick a study and sample, search, open a hit, widen to top-20, then the whole corpus under all three projections, the OSDR-only coverage case, a zoom that re-samples 942,563 points down to 337,542, a hover card, 3-D, and finally the same retrieval drawn and framed on the map.
+The query throughout is `OSD-137|Mmus_BAL-TAL_LVR_FLT_Rep1_F1`, a 39-day spaceflight mouse liver, whose nearest Earth analog is a GEO mouse liver at cosine 0.9996.
+The folder itself is untracked - 22 MB of PNGs is a lot to put in git history when the driver is committed and regenerates them.
+Re-running it from the committed copy reproduced eleven of the fourteen byte-for-byte; the three that differ are the wheel-zoom detail view, the hover inside it, and the 3-D camera drag, which are the only shots whose framing comes from mouse gestures.
+
+**Reviewing the shots found a real layout bug, now fixed.**
+`.app-shell` declared `min-height: 100%` where it needed `height: 100%`.
+A floor is not a ceiling, so the shell grew to fit its tallest child: opening a hit whose GEO record ran long took the page from 1010 px to **1420 px**, pushing 410 px below the fold.
+The "Generate AI summary" button went off screen, and the network canvas - `height: 100%` of a column that had just got taller - was cut off at the bottom of the window, which is what made the top-20 network look clipped.
+Every `overflow: hidden` and `min-height: 0` in `retrieve.css` already assumed a fixed-height shell; only the shell itself did not.
+`.app-grid` also needed an explicit `grid-template-rows: minmax(0, 1fr)`, because an implicit `auto` row is sized by its tallest item's content and would have re-created the same growth one level down.
+With both, the page stays at exactly the viewport height and `.details-panel` scrolls its own overflow, which is what its `overflow-y: auto` was there for all along.
+Verified at 1010 px and 800 px viewport heights; the map view is unaffected at both.
+
+Five new checks in `tests/e2e_check.py` section 7 pin it, because no Python test can see a CSS layout: the page must not grow when the inspector opens, the inspector must scroll instead, and the AI panel must stay on screen.
+211 tests pass, 45 browser checks pass (was 40).
+
+**One thing observed and deliberately not changed.** The map's hover card takes Plotly's default background, which is the trace's own colour, so hovering a Liver point gives an orange card and an "Other" point a grey one.
+The retrieval half fixed exactly this in `figures.py` by pinning `hoverlabel` to a white card with an explicit font colour.
+Doing the same on the dark plot canvas is a defensible change but a design one, and the palette there was validated as a set, so it is left for Josh to call rather than made unilaterally.
+
+## 2026-07-26 (slide deck source doc)
+
+Added `docs/slide-deck-source.md`, a talk-ready source document: motivation (2,108 spaceflight samples against 940,455 Earth samples, 446 to 1), the end-to-end method, the evidence, the honesty section (the three rejected candidates and the arbitrary-projection null), the model, the visualization, the generalization argument beyond space biology, a 21-slide proposed order with speaker notes, and a number sheet for the appendix.
+
+Every figure in it was pulled from `REFERENCE.md`, `README.md`, or read directly off the artifacts.
+Two facts were read off the checkpoint for this doc and were not previously recorded anywhere: `ckpt['config']` carries **`mask_ratio` 0.15**, lr 1e-4, 20 epochs with early stopping (patience 5), balanced shard sampling; `ckpt['run_metadata']['dataset']` carries **640,000 train / 160,000 validation samples**; and the checkpoint's top level carries `epoch` 20, `train_loss` 0.1481, `val_loss` 0.1499, `total_params` 45,593,601.
+Worth folding into `REFERENCE.md` section 1, which currently records the architecture half of `ckpt['config']` but not the training half.
+
+One naming point the doc settles, since Josh's framing was "BERT": the model is a **BERT-style masked-value transformer encoder**, and that is the phrase to use.
+It masks 15% of genes exactly as BERT masks 15% of tokens, but the head is `nn.Linear(hidden, 1)`, so the objective is regression of a masked expression value rather than classification over a vocabulary, and the shipped checkpoint's `feature_type: flash` means it runs exact scaled-dot-product attention, not the FAVOR+ linear attention the "Performer" in `ExpressionPerformer` refers to.
+## 2026-07-23 (file ingestion: embed an uploaded OSDR sample live)
+
+The Retrieve view can now take an OSDR sample the corpus has never seen: upload its counts, embed it live, and get the identical output (network graph + inspector + optional LLM summary) the picker produces, scored against the same 940,455-sample ARCHS4 index.
+
+**It is a fourth query-vector source, not a new pipeline.** `bridge_rna/retrieval.py` was already built around one fact - the cosine scan (`_topk_cosine_from_memmap`) is shared, and the cached/precomputed/demo paths differ only in where the 512-d query vector comes from. Uploading is that fourth source. Everything downstream - the scan, the offline annotation (`_annotate_from_cache`), the `archs4_index` map join - is reused unchanged, so an uploaded sample's hits carry the same schema (gse / title / tissue / species + a map position) as a cached OSDR sample's. `run_uploaded_retrieval` returns mode `"uploaded"`, and the status banner names it via the shared `_retrieval_phrase`.
+
+**The embedding is a subprocess, by the same rule the demo path follows.** The serving app never imports torch (pinned by a test), so `precompute/embed_upload.py` loads the checkpoint, embeds one counts file, writes a 512-d npy, and exits; `bridge_rna.retrieval.embed_uploaded_counts` shells out to it. The preprocessing is not re-implemented - it reuses the exact symbols funnelled through `manifold/bridge_rna.py`, so an uploaded sample is embedded in the same gene order, ortholog mapping, TPM/log1p pipeline, and encode call as the corpus. **Invariant 1 (the gene-digest gate) is enforced before any vector is produced.**
+
+**Validated end to end on the real model and corpus.** Embedding OSD-100's own counts file through the upload path reproduces its precomputed cached vector at **cosine 1.00000000, max abs diff 0.0** - the definitive check that scores are comparable. A full uploaded search of the eye sample `Mmus_C57-6J_EYE_FLT_Rep1_M23` against all 940,455 ARCHS4 samples returns eye-tissue analogs (GSM6204794, GSM4256053) in its top 5, annotated and locatable on the map. Input contract: mouse Ensembl-indexed counts CSV/TSV (OSDR is Mus musculus); a file that maps zero orthologs, or a digest mismatch, is refused with a clean one-line reason, never embedded into a meaningless vector.
+
+UI: a `dcc.Upload` dropzone and a sample-column picker in the Retrieve rail, a separate Embed-&-search callback writing the shared outputs with `allow_duplicate=True`. Downstream callbacks (details, AI summary, See-on-map) resolve the query row from a `query` dict now carried in the hits-store payload, so they work for a sample that is not in `samples_df`. Flask `MAX_CONTENT_LENGTH` capped at 200 MB. Tests 219 (8 new in `test_upload_ingestion.py`, including the live-vs-cached parity gate and the gene-digest abort). Design doc: `docs/file_ingestion.md`.
+
 ## 2026-07-23 (spectral init restores the species separation)
 
 Josh reported that even at `n_neighbors=30` the map looked less segmented than the version he remembered, specifically the human/mouse split. He was right, and it was not `n_neighbors`.

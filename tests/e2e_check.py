@@ -62,12 +62,45 @@ COUNT_JS = """() => {
 }"""
 
 
+# The retrieval network is drawn as one node trace after the edge traces, and
+# its customdata carries [kind, node_id, hover] per node - so the last trace
+# having several nodes is the signal that a search has landed.
+NETWORK_READY_JS = """() => {
+  const gd = document.querySelector('#network-graph .js-plotly-plot');
+  if (!gd || !gd._fullData || !gd._fullData.length) return false;
+  const t = gd._fullData[gd._fullData.length - 1];
+  return !!(t && t.customdata && t.customdata.length > 3);
+}"""
+
+# Pixel centre of the first GSM node, via Plotly's own data->pixel transform,
+# so the check clicks the node a user would click.
+GSM_NODE_JS = """() => {
+  const gd = document.querySelector('#network-graph .js-plotly-plot');
+  if (!gd || !gd._fullData) return null;
+  const t = gd._fullData[gd._fullData.length - 1];
+  if (!t || !t.customdata) return null;
+  for (let i = 0; i < t.customdata.length; i++) {
+    if (t.customdata[i][0] !== 'gsm') continue;
+    const xa = gd._fullLayout.xaxis, ya = gd._fullLayout.yaxis;
+    const r = gd.getBoundingClientRect();
+    return {x: r.left + xa._offset + xa.l2p(t.x[i]),
+            y: r.top + ya._offset + ya.l2p(t.y[i]),
+            id: t.customdata[i][1]};
+  }
+  return null;
+}"""
+
+
 class Checks:
     def __init__(self):
         self.failures: list[str] = []
+        self.ran = 0
         self.notes: list[str] = []
 
     def ok(self, cond: bool, msg: str) -> bool:
+        # Counted, because the documented totals used to be hand-written and
+        # drifted: the number in the docs was never the number this file ran.
+        self.ran += 1
         print(("  OK   " if cond else "  FAIL ") + msg, flush=True)
         if not cond:
             self.failures.append(msg)
@@ -188,6 +221,36 @@ def main() -> int:
             c.ok(method_h < 60,
                  f"the projection control is a single row ({method_h:.0f}px tall)")
 
+            # A whole-map field says nothing under the control: the full bar is
+            # the answer, and "Colours all 942,563 points." only restated it.
+            cov = page.locator("#coverage").inner_text().strip()
+            c.ok(cov == "",
+                 f"a whole-map field leaves the coverage readout silent: {cov!r}")
+            c.ok(page.locator(".bm-coverage-bar").count() == 1,
+                 "while the bar itself stays, so the rail does not jump")
+
+            print("\n=== 2b. the key names the shapes, not only the hues ===")
+            # That a diamond is one of the 2,108 spaceflight samples has been
+            # true since the map was built and was stated nowhere a viewer could
+            # read it. The colour legend keys hue; this keys shape.
+            corpus = page.locator("#legend-corpus").inner_text().replace("\n", " ")
+            print(f"     corpus key: {corpus!r}")
+            c.ok("ARCHS4" in corpus and "OSDR" in corpus,
+                 f"both corpora are keyed by shape: {corpus!r}")
+            shapes = page.eval_on_selector_all(
+                "#legend-corpus .bm-key-glyph", "els => els.map(e => e.className)")
+            c.ok(any("corpus-archs4" in s for s in shapes)
+                 and any("corpus-osdr" in s for s in shapes),
+                 f"each with its own glyph: {shapes}")
+            # A key is what you are looking at, so an untickable layer leaves it.
+            page.locator("#layers input[type=checkbox]").nth(1).uncheck()
+            page.wait_for_timeout(2500)
+            corpus = page.locator("#legend-corpus").inner_text()
+            c.ok("OSDR" not in corpus,
+                 f"unticking a layer drops its row from the key: {corpus!r}")
+            page.locator("#layers input[type=checkbox]").nth(1).check()
+            page.wait_for_timeout(2500)
+
             print("\n=== 3. an OSDR-only field draws context, not a grey category ===")
             page.locator("#color-by").click()
             page.locator(".dash-dropdown-content").get_by_text(
@@ -209,7 +272,7 @@ def main() -> int:
             coverage = page.locator("#coverage").inner_text()
             print(f"     coverage: {coverage!r}")
             c.ok("context" in coverage.lower(),
-                 "the coverage readout explains what happens to uncoloured points")
+                 "the coverage readout explains what happens to uncolored points")
             page.screenshot(path=str(SHOTS / "02-osdr-only-context.png"))
 
             print("\n=== 4. budget tiers re-render ===")
@@ -332,7 +395,61 @@ def main() -> int:
                                         f"({info['total']:,})")
                 page.screenshot(path=str(SHOTS / "07-zoomed.png"))
 
-            print("\n=== 7. console ===")
+            print("\n=== 7. the retrieval view fits its window ===")
+            # Both views are fixed-height instruments that scroll internally,
+            # and nothing in the Python can tell you whether they still do.
+            # This caught the shell growing to fit its tallest child: opening a
+            # hit whose GEO record ran long pushed the page 410 px below the
+            # fold, took the AI panel off screen, and stretched the network
+            # canvas out of the window with it. The page height is the check,
+            # because that is the thing that must not move.
+            rp = browser.new_page(viewport={"width": 1680, "height": 1010})
+            rp.on("console", lambda m: console_errors.append(m.text)
+                  if m.type == "error" else None)
+            rp.on("pageerror", lambda e: console_errors.append(str(e)))
+            rp.goto(f"http://127.0.0.1:{args.port}/", wait_until="load")
+            rp.wait_for_selector(".sample-preview", timeout=60_000)
+            rp.wait_for_timeout(1500)
+            fits = "() => document.scrollingElement.scrollHeight" \
+                   " <= document.scrollingElement.clientHeight"
+            c.ok(rp.evaluate(fits), "the view fits the window before a search")
+
+            rp.locator("#search-button").click()
+            rp.wait_for_function(NETWORK_READY_JS, timeout=180_000)
+            rp.wait_for_timeout(1500)
+            c.ok(rp.evaluate(fits), "the view still fits once the network is drawn")
+
+            # Open the hit whose record is longest, since the bug only showed
+            # up on a hit with enough metadata to overflow the inspector.
+            pos = rp.evaluate(GSM_NODE_JS)
+            if pos:
+                rp.mouse.click(pos["x"], pos["y"])
+                rp.wait_for_function(
+                    "() => { const d = document.querySelector('#details-panel');"
+                    " return d && d.innerText.includes('GSM'); }", timeout=90_000)
+                rp.wait_for_timeout(3000)
+                geom = rp.evaluate(
+                    """() => {
+                      const d = document.querySelector('.details-panel');
+                      const ai = document.querySelector('.ai-panel');
+                      return {sh: document.scrollingElement.scrollHeight,
+                              ch: document.scrollingElement.clientHeight,
+                              scrolls: d.scrollHeight > d.clientHeight,
+                              aiBottom: Math.round(ai.getBoundingClientRect().bottom)};
+                    }""")
+                print(f"     {geom}")
+                c.ok(geom["sh"] <= geom["ch"],
+                     f"an open inspector does not grow the page ({geom['sh']} "
+                     f"vs {geom['ch']})")
+                c.ok(geom["scrolls"],
+                     "the inspector scrolls its own overflow instead")
+                c.ok(geom["aiBottom"] <= geom["ch"],
+                     f"the AI panel stays on screen (bottom at {geom['aiBottom']})")
+            else:
+                c.ok(False, "no GSM node to open in the inspector")
+            rp.close()
+
+            print("\n=== 8. console ===")
             real = [e for e in console_errors
                     if "favicon" not in e.lower() and "_dash-component-suites" not in e]
             for e in real[:10]:
@@ -353,9 +470,9 @@ def main() -> int:
     if c.failures:
         for f in c.failures:
             print("FAIL: " + f)
-        print(f"E2E FAILED ({len(c.failures)} checks)")
+        print(f"E2E FAILED ({len(c.failures)} of {c.ran} checks)")
         return 1
-    print(f"ALL E2E CHECKS PASSED (screenshots in {SHOTS})")
+    print(f"ALL {c.ran} E2E CHECKS PASSED (screenshots in {SHOTS})")
     return 0
 
 
