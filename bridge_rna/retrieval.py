@@ -1,8 +1,12 @@
-"""Retrieval: one OSDR sample in, its nearest ARCHS4 analogs out.
+"""Retrieval: an OSDR query in, its nearest ARCHS4 analogs out.
 
-There are three paths to a query embedding, tried in this order, and the app
-always reports which one ran because they differ in speed and in how much
-metadata comes back with the answer.
+Five paths produce a query vector and the app always reports which one ran,
+because they differ in speed and in how much metadata comes back. The three
+below are the ones `search_hits` chooses between for a single catalog sample,
+tried in this order; the other two are chosen by the user rather than by
+fallback - `run_uploaded_retrieval` for a file the corpus has never seen, and
+`run_cohort_retrieval` for a whole experimental group pooled into one vector.
+All five end in the same cosine scan.
 
 1. **cached** - the manifold precompute already embedded all 2,108 eligible
    OSDR samples (`cache/osdr_sample_embeddings.float32.npy`), using a
@@ -43,6 +47,7 @@ from .config import (
     OSDR_METADATA_PATH,
     PRECOMPUTED_QUERY_EMBEDDING_CANDIDATES,
     ROOT,
+    UPLOAD_EMBED_SCRIPT_PATH,
 )
 from .geo import _enrich_hits_from_ncbi_eutils
 from .preflight import preflight_retrieval_requirements
@@ -102,6 +107,29 @@ def cached_query_vector(sample_id: str) -> np.ndarray | None:
     vectors, index = cached
     row = index.get(_safe_str(sample_id))
     return None if row is None else vectors[row]
+
+
+def cached_query_vectors(sample_ids: list[str] | tuple[str, ...]
+                         ) -> tuple[np.ndarray, list[str]]:
+    """The precomputed vectors for several OSDR samples, and the ones missing.
+
+    Returns `(rows, missing)` where `rows` is `(k, 512)` in the order the ids
+    were given, minus any that have no cached vector. The missing list is
+    returned rather than swallowed because a cohort silently pooling five of its
+    six members would produce a different answer than the one the interface
+    claims to have computed.
+    """
+    found: list[np.ndarray] = []
+    missing: list[str] = []
+    for sid in sample_ids:
+        vec = cached_query_vector(sid)
+        if vec is None:
+            missing.append(_safe_str(sid))
+        else:
+            found.append(vec)
+    rows = (np.stack(found).astype(np.float32) if found
+            else np.zeros((0, 0), dtype=np.float32))
+    return rows, missing
 
 
 def cached_query_coverage() -> tuple[int, bool]:
@@ -371,29 +399,91 @@ def _load_precomputed_osdr_queries(path: Path) -> pd.DataFrame:
     )
 
 
-def _topk_cosine_from_memmap(index_vecs: np.memmap, q_vec: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-    q = np.asarray(q_vec, dtype=np.float32).reshape(-1)
-    if q.size == 0:
+def _topk_cosine_matrix(index_vecs: np.memmap, q_mat: np.ndarray, k: int,
+                        block_bytes: int = 200_000_000,
+                        progress: Any = None) -> tuple[np.ndarray, np.ndarray]:
+    """Top-k for `m` query vectors in **one** pass over the index.
+
+    The single implementation of the cosine scan. Every path in this module
+    reaches the ARCHS4 index through here, so a pooled cohort query, each of its
+    leave-one-out variants, and a plain single sample are all scored by the same
+    code rather than by three that could drift.
+
+    Returns `(idx, scores)`, both `(m, k)`, each row sorted best first.
+
+    Scoring `m` queries at once is what makes live result stability affordable:
+    the read and the float16-to-float32 normalization dominate, and the matrix
+    multiply against `m` queries is nearly free beside them. Measured against
+    the real 963 MB memmap: 0.44 s at m=1, 0.50 s at m=11, 1.00 s at m=77, so
+    the largest cohort in the corpus costs about half a second more than the
+    single pooled query it already paid for.
+
+    The top-k is kept as a running merge per query rather than by partitioning a
+    full `(n, m)` score matrix, which would allocate 290 MB at m=77 and grow
+    without bound. Memory stays at one block. That is the same technique
+    `precompute/validate_cohorts.py` and `validate_artifacts.py --mixing` use,
+    and the validator now calls straight in here rather than keeping a second
+    copy of it: `progress(rows_done, total)` is what lets a several-thousand
+    query sweep still print where it has got to.
+    """
+    Q = np.asarray(q_mat, dtype=np.float32)
+    if Q.ndim == 1:
+        Q = Q.reshape(1, -1)
+    if Q.size == 0 or Q.shape[0] == 0:
         raise RuntimeError("Query embedding is empty.")
-    q = q / (float(np.linalg.norm(q)) + 1e-12)
+    Q = Q / np.maximum(np.linalg.norm(Q, axis=1, keepdims=True), 1e-12)
 
     n = int(index_vecs.shape[0])
     d = int(index_vecs.shape[1])
-    if q.shape[0] != d:
-        raise RuntimeError(f"Embedding dimension mismatch: query dim={q.shape[0]} but ARCHS4 dim={d}")
+    if Q.shape[1] != d:
+        raise RuntimeError(
+            f"Embedding dimension mismatch: query dim={Q.shape[1]} but ARCHS4 dim={d}")
 
+    m = Q.shape[0]
     k = max(1, min(int(k), n))
-    chunk = 25000
-    scores = np.empty(n, dtype=np.float32)
+    Qt = np.ascontiguousarray(Q.T)                      # (d, m)
+
+    # The block *height* is derived from the query count, because the score
+    # block is (rows x queries): a fixed 25,000 rows is 3.9 MB at m=39 and would
+    # be far more if a caller ever batched hundreds. It resolves to exactly the
+    # 25,000 the single-query scan always used for any m up to 2,000.
+    chunk = int(max(2000, min(25000, int(block_bytes) // (4 * m))))
+
+    best_idx = np.zeros((m, 0), dtype=np.int64)
+    best_score = np.zeros((m, 0), dtype=np.float32)
     for start in range(0, n, chunk):
         end = min(start + chunk, n)
         x = np.asarray(index_vecs[start:end], dtype=np.float32)
         x /= (np.linalg.norm(x, axis=1, keepdims=True) + 1e-12)
-        scores[start:end] = x @ q
+        block = (x @ Qt).T                              # (m, rows in block)
 
-    top_idx = np.argpartition(scores, -k)[-k:]
-    top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]
-    return top_idx, scores[top_idx]
+        take = min(k, block.shape[1])
+        part = np.argpartition(block, -take, axis=1)[:, -take:]
+        cand_idx = np.concatenate([best_idx, part + start], axis=1)
+        cand_score = np.concatenate(
+            [best_score, np.take_along_axis(block, part, axis=1)], axis=1)
+        keep = min(k, cand_idx.shape[1])
+        sel = np.argpartition(cand_score, -keep, axis=1)[:, -keep:]
+        best_idx = np.take_along_axis(cand_idx, sel, axis=1)
+        best_score = np.take_along_axis(cand_score, sel, axis=1)
+        if progress is not None:
+            progress(end, n)
+
+    order = np.argsort(-best_score, axis=1)
+    return (np.take_along_axis(best_idx, order, axis=1),
+            np.take_along_axis(best_score, order, axis=1))
+
+
+def _topk_cosine_from_memmap(index_vecs: np.memmap, q_vec: np.ndarray,
+                             k: int) -> tuple[np.ndarray, np.ndarray]:
+    """One query vector's top-k. A one-row call into `_topk_cosine_matrix`.
+
+    Verified against the previous standalone implementation on the real corpus
+    before it was replaced: identical top-30 in order, maximum score difference
+    exactly 0.0.
+    """
+    idx, score = _topk_cosine_matrix(index_vecs, np.asarray(q_vec).reshape(1, -1), k)
+    return idx[0], score[0]
 
 
 def run_precomputed_query_retrieval(sample_id: str, sample_name: str, topk: int) -> pd.DataFrame:
@@ -588,6 +678,176 @@ def run_real_retrieval(
         
 
         return normalized
+
+
+# --- The fourth query-vector source: a file the corpus has never seen --------
+
+UPLOAD_MODE = "uploaded"
+
+
+def embed_uploaded_counts(
+    counts_path: str | Path,
+    sample_column: str | None = None,
+) -> np.ndarray:
+    """Embed one uploaded OSDR counts file to its 512-d vector, live.
+
+    The serving app never imports torch, so this shells out to
+    `precompute/embed_upload.py`, exactly as the `demo` path shells out to
+    `demo_osdr_top5.py`. The subprocess enforces invariant 1 (the gene-digest
+    gate) before it produces anything, so a sample can never be embedded in a
+    gene order the ARCHS4 index was not built in.
+
+    Raises RetrievalError with a clean one-line message on any failure (missing
+    model prerequisites, an unreadable file, no ortholog-mappable genes, a digest
+    mismatch); the full detail is logged server-side.
+    """
+    missing, resolved = preflight_retrieval_requirements()
+    needed = ("checkpoint", "orthologs", "canonical_genes", "mouse_exon_lengths")
+    unresolved = [k for k in needed if resolved.get(k) is None]
+    if unresolved:
+        raise RetrievalError(
+            "Cannot embed an uploaded sample: missing model prerequisites "
+            f"({', '.join(unresolved)}). " + ("; ".join(missing) if missing else ""),
+            detail="; ".join(missing),
+        )
+
+    counts_path = Path(counts_path)
+    if not counts_path.exists():
+        raise RetrievalError(f"Uploaded counts file not found: {counts_path}")
+
+    with tempfile.TemporaryDirectory(prefix="osdr_upload_") as td:
+        out_path = Path(td) / "query_vector.npy"
+        cmd = [
+            sys.executable,
+            str(UPLOAD_EMBED_SCRIPT_PATH),
+            "--counts", str(counts_path),
+            "--out", str(out_path),
+            "--sample", _safe_str(sample_column),
+            "--checkpoint", str(resolved["checkpoint"]),
+            "--orthologs", str(resolved["orthologs"]),
+            "--canonical-genes", str(resolved["canonical_genes"]),
+            "--mouse-exon-lengths", str(resolved["mouse_exon_lengths"]),
+            "--device", "cpu",
+        ]
+        proc = subprocess.run(
+            cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=600
+        )
+        if proc.returncode != 0 or not out_path.exists():
+            msg = _safe_str(proc.stderr) or _safe_str(proc.stdout)
+            print(
+                "[embed_uploaded_counts] embed subprocess failed (returncode "
+                f"{proc.returncode}). Full output below:\n{msg}",
+                file=sys.stderr, flush=True,
+            )
+            # The script raises SystemExit("ABORT: ...") for the expected failures,
+            # so the last non-empty line is the actionable reason, not a stack trace.
+            reason = _last_nonempty_line(msg) or "Embedding the uploaded sample failed."
+            reason = reason.replace("ABORT: ", "")
+            raise RetrievalError(reason, detail=msg)
+
+        vec = np.load(out_path).astype(np.float32).reshape(-1)
+    if vec.size == 0:
+        raise RetrievalError("The uploaded sample produced an empty embedding.")
+    return vec
+
+
+def run_uploaded_retrieval(
+    counts_path: str | Path,
+    sample_column: str | None,
+    topk: int,
+    entrez_email: str | None = None,
+    enable_biopython_metadata: bool = True,
+) -> pd.DataFrame:
+    """Embed an uploaded sample live, then run the identical scan the cached path runs.
+
+    The query vector is the only thing new here. The cosine scan, the offline
+    annotation from `archs4_metadata.parquet`, and the `archs4_index` column are
+    the same code the cached path uses, so an uploaded sample's hits carry the
+    same schema - gse / title / tissue / species and a map position - as a
+    precomputed OSDR sample's.
+    """
+    q_vec = embed_uploaded_counts(counts_path, sample_column)
+    index_vecs, _, _ = _load_archs4_index()
+    idx, score = _topk_cosine_from_memmap(index_vecs=index_vecs, q_vec=q_vec, k=topk)
+    hits = _annotate_from_cache(idx, score)
+    hits["archs4_index"] = idx.astype(int)
+    hits = hits.sort_values("score", ascending=False).reset_index(drop=True)
+    if enable_biopython_metadata and _safe_str(entrez_email):
+        hits = _enrich_hits_from_ncbi_eutils(hits, _safe_str(entrez_email))
+    return hits
+
+
+# --- The fifth query-vector source: a whole experimental group ---------------
+
+COHORT_MODE = "cohort"
+
+
+def run_cohort_retrieval(sample_ids: list[str] | tuple[str, ...], topk: int
+                         ) -> tuple[pd.DataFrame, np.ndarray, Any]:
+    """Pool a cohort's cached vectors into one query, then run the cached scan.
+
+    The pooled vector is the only new thing. The cosine scan, the offline
+    annotation from `archs4_metadata.parquet`, and the `archs4_index` column are
+    the same code the cached path uses, so a cohort's hits carry the identical
+    schema - gse / title / tissue / species and a map position - as one sample's.
+    That is the same relationship file ingestion has to the cached path, and it
+    is why nothing downstream of the hits frame needs to know a cohort produced
+    it.
+
+    **Result stability is measured here, not predicted.** The scan also scores
+    every leave-one-out pool and every member on its own, which answers "how
+    much of this list survives dropping one animal, and how much would one
+    animal alone have agreed with another" for *this* cohort at *this* depth. It
+    replaces a bucketed curve looked up by cohort size, which was a population
+    average being printed beside one cohort's name; `docs/live_stability.md`
+    carries the measured spread that motivated the change.
+
+    Still **one memmap pass**, because all `2k+1` query vectors are built before
+    the index is touched and scored together. Measured: 0.44 s for the pooled
+    query alone, 1.00 s for the 77 vectors a 38-animal cohort needs, against a
+    963 MB read that dominates both.
+
+    Returns `(hits, rows, stability)`. The members' stacked vectors come back so
+    the caller can compute the cohort's geometry without loading them twice;
+    `stability` is a `cohorts.StabilityMeasurement`, or None for a pool with
+    nothing to leave out.
+    """
+    from .cohorts import cohort_query_vector, leave_one_out_vectors, measure_stability
+
+    ids = [_safe_str(s) for s in sample_ids if _safe_str(s)]
+    if not ids:
+        raise RetrievalError("No samples were selected to pool.")
+
+    rows, missing = cached_query_vectors(ids)
+    if missing:
+        raise RetrievalError(
+            f"{len(missing)} of the {len(ids)} selected samples have no "
+            "precomputed embedding, so the cohort cannot be pooled as described. "
+            "Re-run precompute/embed_osdr.py.",
+            detail="Missing: " + ", ".join(missing[:20]),
+        )
+
+    # Row 0 is the query whose hits are returned; the leave-one-out pools and
+    # the members' own vectors follow it, and exist only to measure the first.
+    loo = leave_one_out_vectors(rows)
+    q_mat = np.concatenate([cohort_query_vector(rows).reshape(1, -1), loo, rows])
+
+    index_vecs, _, _ = _load_archs4_index()
+    idx, score = _topk_cosine_matrix(index_vecs=index_vecs, q_mat=q_mat, k=topk)
+
+    hits = _annotate_from_cache(idx[0], score[0])
+    hits["archs4_index"] = idx[0].astype(int)
+    hits = hits.sort_values("score", ascending=False).reset_index(drop=True)
+
+    k = len(rows)
+    stability = measure_stability(
+        members=ids,
+        pooled_top=idx[0],
+        loo_tops=idx[1:1 + len(loo)],
+        member_tops=idx[1 + len(loo):1 + len(loo) + k],
+        depth=int(topk),
+    )
+    return hits, rows, stability
 
 
 def search_hits(

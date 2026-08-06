@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-from dash import Input, Output, State, html, no_update
+from dash import Input, Output, State, ctx, html, no_update
 
 from . import colorby, data, layout, render
 
@@ -13,26 +13,22 @@ from . import colorby, data, layout, render
 LEGEND_SEARCH_MIN_ITEMS = 8
 
 
-def _retrieval_overlay(hits_payload: dict | None) -> dict | None:
-    """Turn a stored retrieval into point indices on this map.
+#: The roles a drawn query can have. "a" is every single-sample, uploaded and
+#: single-cohort search as well as the first arm of a comparison; "b" exists
+#: only when a comparison was run.
+ROLE_A, ROLE_B = "a", "b"
 
-    This is the whole cross-view translation, and it is this short because
-    there is nothing to translate. An ARCHS4 hit carries `archs4_index`, its
-    row in the embedding memmap, and ARCHS4 occupies rows `0..n_archs4-1` of
-    the map's global point order - so the row *is* the point. The OSDR query is
-    found by its `sample_key`, the same string the retrieval calls `sample_id`.
 
-    Returns None when there is nothing to draw, or when the hits predate the
-    `archs4_index` column: a retrieval whose hits cannot be located is not
-    drawn at all rather than drawn in the wrong place.
+def _locate_hits(hits: list, n_archs4: int):
+    """ARCHS4 hits to point indices, dropping any that cannot be located.
+
+    An ARCHS4 hit carries `archs4_index`, its row in the embedding memmap, and
+    ARCHS4 occupies rows `0..n_archs4-1` of the map's global point order - so
+    the row *is* the point. A hit that predates that column is not drawn at all
+    rather than drawn in the wrong place.
     """
-    if not hits_payload:
-        return None
-    hits = hits_payload.get("hits") or []
-    n_archs4, n_osdr, _ = data.counts()
-
     points, labels, scores = [], [], []
-    for hit in hits:
+    for hit in hits or []:
         idx = hit.get("archs4_index")
         if idx is None:
             continue
@@ -41,21 +37,127 @@ def _retrieval_overlay(hits_payload: dict | None) -> dict | None:
             points.append(idx)
             labels.append(str(hit.get("gsm") or ""))
             scores.append(float(hit.get("score") or 0.0))
+    return points, labels, scores
 
-    query_point, query_label = None, ""
-    sample_id = str(hits_payload.get("sample_id") or "")
-    if sample_id:
-        meta = data.osdr_metadata()
-        if "sample_key" in meta.columns:
-            match = meta.index[meta["sample_key"].astype(str) == sample_id]
-            if len(match):
-                query_point = n_archs4 + int(match[0])
-                query_label = sample_id
 
-    if not points and query_point is None:
+def _locate_members(keys: list, n_archs4: int) -> list[int]:
+    """OSDR sample keys to point indices, by the join the whole app is built on.
+
+    A pooled cohort has no single position in the space - its query vector is a
+    mean, and no projection was fit on it - so what gets drawn is every member.
+    """
+    keys = [str(k) for k in keys if str(k)]
+    if not keys:
+        return []
+    meta = data.osdr_metadata()
+    if "sample_key" not in meta.columns:
+        return []
+    row_of = {k: i for i, k in enumerate(meta["sample_key"].astype(str))}
+    return [n_archs4 + int(row_of[k]) for k in keys if k in row_of]
+
+
+def _retrieval_overlay(hits_payload: dict | None,
+                       roles: tuple[str, ...] = (ROLE_A, ROLE_B)) -> dict | None:
+    """Turn a stored retrieval into point indices on this map.
+
+    Returns one entry in `cohorts` per drawn query, plus flat `hit_points` /
+    `query_points` / `query_point` / `query_label` keys holding the **union**
+    across those entries. The flat keys are what `_frame_for` and the retrieval
+    summary read, so keeping them a union rather than cohort A's own values is
+    what makes a comparison frame and describe both arms without either of them
+    learning what a comparison is.
+
+    `roles` is which arms the user has ticked on the map rail. An untickable
+    single-query payload always produces the one `a` entry, so every existing
+    behaviour falls out of the general path unchanged.
+
+    Returns None when there is nothing to draw.
+    """
+    if not hits_payload:
         return None
-    return {"hit_points": points, "hit_labels": labels, "hit_scores": scores,
-            "query_point": query_point, "query_label": query_label}
+    n_archs4, _n_osdr, _ = data.counts()
+    comparison = hits_payload.get("comparison") or {}
+
+    # A cohort's `sample_id` is a cohort id and matches no sample_key, so the
+    # single-sample fallback below can never collide with a cohort's members.
+    sources = [
+        (ROLE_A,
+         hits_payload.get("hits"),
+         (hits_payload.get("member_ids")
+          or [hits_payload.get("sample_id") or ""]),
+         _cohort_label(hits_payload.get("query"))),
+    ]
+    if comparison:
+        sources.append(
+            (ROLE_B,
+             comparison.get("hits_b"),
+             comparison.get("member_ids") or [],
+             _cohort_label(comparison.get("query_b"))))
+
+    cohorts = []
+    for role, hits, keys, label in sources:
+        if role not in roles:
+            continue
+        points, labels, scores = _locate_hits(hits, n_archs4)
+        members = _locate_members(keys, n_archs4)
+        if not points and not members:
+            continue
+        cohorts.append({"role": role,
+                        # The cohort's own name for a pooled query; for a single
+                        # sample there is none, and its sample key is the name.
+                        "label": label or (str(keys[0]) if keys else ""),
+                        "hit_points": points, "hit_labels": labels,
+                        "hit_scores": scores, "query_points": members})
+
+    if not cohorts:
+        return None
+
+    hit_points = [p for c in cohorts for p in c["hit_points"]]
+    query_points = [p for c in cohorts for p in c["query_points"]]
+    first = set(cohorts[0]["hit_points"])
+    shared_points = sorted(first.intersection(
+        p for c in cohorts[1:] for p in c["hit_points"]))
+
+    if len(cohorts) > 1:
+        query_label = " vs ".join(c["label"] or "cohort" for c in cohorts)
+    elif not query_points:
+        # Nothing of the query is on this map: an uploaded sample has no
+        # `sample_key`, so it has no coordinate. The label stays empty and the
+        # rail says "an OSDR sample" rather than announcing "0 pooled cohort
+        # samples", which would be false twice over.
+        query_label = ""
+    elif len(query_points) == 1:
+        query_label = cohorts[0]["label"]
+    else:
+        query_label = f"{len(query_points)} pooled cohort samples"
+
+    return {"cohorts": cohorts,
+            "hit_points": hit_points,
+            "hit_labels": [lb for c in cohorts for lb in c["hit_labels"]],
+            "hit_scores": [s for c in cohorts for s in c["hit_scores"]],
+            "shared_points": shared_points,
+            # `query_point` stays for the single-sample case: `_frame_for` needs
+            # one origin, and any drawn member serves.
+            "query_point": query_points[0] if query_points else None,
+            "query_points": query_points,
+            "query_label": query_label}
+
+
+def _cohort_label(query: dict | None) -> str:
+    """The cohort's own name, for the map key. Empty for a non-cohort query."""
+    return str((query or {}).get("cohort_label") or "")
+
+
+def _roles_from_checklist(value: list | None) -> tuple[str, ...]:
+    """Which cohorts the rail's ticks ask for.
+
+    `"on"` is cohort A rather than `"a"` so that a single-query retrieval keeps
+    the exact value the control has always held, and so a session store written
+    before comparisons could be drawn still resolves.
+    """
+    ticked = set(value or ())
+    return tuple(role for role, key in ((ROLE_A, "on"), (ROLE_B, ROLE_B))
+                 if key in ticked)
 
 
 def _viewport_from_relayout(relayout: dict | None):
@@ -78,7 +180,8 @@ def _viewport_from_relayout(relayout: dict | None):
     return "unchanged"
 
 
-def _frame_for(hits_payload, method: str, dims: str):
+def _frame_for(hits_payload, method: str, dims: str,
+               roles: tuple[str, ...] = (ROLE_A, ROLE_B)):
     """A viewport containing the query and every hit, with room to breathe.
 
     At full-corpus zoom a retrieval's points are a few pixels apart - the hits
@@ -88,12 +191,15 @@ def _frame_for(hits_payload, method: str, dims: str):
     zoomed in would hide the thing worth seeing first, which is *where in the
     whole corpus* the query landed.
 
+    It frames what is actually ticked, so a comparison with one arm hidden
+    frames the arm on screen rather than a window sized for both.
+
     Returns None (the whole map) if there is nothing to frame, or in 3-D, where
     the viewport store does not drive the camera.
     """
     if dims != "2d":
         return None
-    overlay = _retrieval_overlay(hits_payload)
+    overlay = _retrieval_overlay(hits_payload, roles)
     if overlay is None:
         return None
     points = list(overlay["hit_points"])
@@ -120,10 +226,15 @@ def _frame_for(hits_payload, method: str, dims: str):
 def coverage_children(color_by: str):
     """The coverage readout under the color-by control.
 
-    States the exact number of points the selected field colours. This is the
-    control that answers "why is so much of my map not coloured?" before the
+    States the exact number of points the selected field colors. This is the
+    control that answers "why is so much of my map not colored?" before the
     user has to ask it, and it is why an OSDR-only field is no longer
     indistinguishable from a broken one.
+
+    A whole-map field says nothing. The full bar already is the answer, and the
+    sentence that used to sit under it - "Colors all 942,563 points." - only
+    restated the bar in words. The readout exists for the partial case, which is
+    the one that raises a question.
     """
     spec = colorby.get(color_by)
     covered, total = colorby.coverage(color_by)
@@ -135,14 +246,16 @@ def coverage_children(color_by: str):
         style={"width": f"{max(pct, 1.5):.1f}%"}))
 
     if whole_map:
-        text = f"Colours all {covered:,} points."
+        text = ""
     elif covered:
-        text = (f"Colours {covered:,} of {total:,} points ({pct:.1f}%). "
+        text = (f"Colors {covered:,} of {total:,} points ({pct:.1f}%). "
                 "ARCHS4 is drawn as faint context.")
     else:
         text = "No data for this field on this machine."
 
-    children = [bar, html.Div(text, className="bm-coverage-text")]
+    children = [bar]
+    if text:
+        children.append(html.Div(text, className="bm-coverage-text"))
     missing = spec.missing_hint()
     if missing:
         children.append(html.Div(missing, className="bm-coverage-fix"))
@@ -157,6 +270,9 @@ def register(app):
         Output("legend-title", "children"),
         Output("legend-search", "style"),
         Output("legend-store", "data"),
+        Output("legend-retrieval", "children"),
+        Output("legend-color", "style"),
+        Output("legend-corpus", "children"),
         Output("coverage", "children"),
         Output("color-by-hint", "children"),
         Input("method", "value"),
@@ -175,8 +291,8 @@ def register(app):
     def update_figure(method, dims, color_by, layers, budget, viewport,
                       hits_payload, show_retrieval):
         vp = tuple(viewport) if viewport else None
-        retrieval = (_retrieval_overlay(hits_payload)
-                     if (show_retrieval and "on" in show_retrieval) else None)
+        roles = _roles_from_checklist(show_retrieval)
+        retrieval = _retrieval_overlay(hits_payload, roles) if roles else None
         fig, legend_data, badges = render.build_figure(
             method, dims, color_by, layers or [], budget,
             vp if dims == "2d" else None, retrieval=retrieval)
@@ -187,13 +303,26 @@ def register(app):
                               yaxis=dict(range=[vp[2], vp[3]]))
         badge_children = [_badge(b) for b in badges]
         items = legend_data.get("items", [])
-        legend_style = {} if items else {"display": "none"}
+
+        # The key reads the *full* overlay and is told separately which arms are
+        # ticked, so an unticked cohort can keep its row, receded. `retrieval`
+        # above is the drawn subset and is what the figure gets.
+        key = layout.retrieval_key_children(
+            _retrieval_overlay(hits_payload), roles, dims)
+        corpus = layout.corpus_key_children(layers)
+
+        # The panel is shown when any section has content. It used to hang off
+        # the color items alone, so an OSDR-only field with the OSDR layer
+        # unticked took the whole key off screen - and would now take a drawn
+        # retrieval's key with it.
+        legend_style = {} if (items or key or corpus) else {"display": "none"}
+        color_style = {} if items else {"display": "none"}
         search_style = ({} if len(items) >= LEGEND_SEARCH_MIN_ITEMS
                         else {"display": "none"})
         title = f"Color · {legend_data['title']}"
         return (fig, badge_children, legend_style, title, search_style,
-                legend_data, coverage_children(color_by),
-                colorby.get(color_by).hint)
+                legend_data, key, color_style, corpus,
+                coverage_children(color_by), colorby.get(color_by).hint)
 
     @app.callback(
         Output("budget", "options"),
@@ -264,8 +393,9 @@ def register(app):
 
     @app.callback(
         Output("retrieval-group", "style"),
-        Output("retrieval-summary", "children"),
         Output("frame-retrieval", "style"),
+        Output("show-retrieval", "options"),
+        Output("show-retrieval", "value"),
         Input("hits-store", "data"),
         Input("dims", "value"),
     )
@@ -279,18 +409,98 @@ def register(app):
         pinning the 2-D axis ranges, which the 3-D camera ignores, so the
         button would have been a click with no visible effect - the thing this
         map removed the lasso for.
+
+        The ticks are only *reset* when the retrieval itself changes. This
+        callback also fires on a dimensionality switch, because the frame button
+        is 2-D only, and reasserting the value there would silently re-tick an
+        arm the user had hidden the moment they looked at it in 3-D.
+
+        A comparison turns the single "Show it on the map" tick into one tick
+        per cohort, each carrying that cohort's own name. It is the same control
+        rather than a new one, so nothing else on the rail moves, and unticking
+        one is the escape hatch when two large cohorts crowd the same region.
+
+        The key *under* the ticks is a separate callback, because it describes
+        what is drawn and therefore has to depend on the ticks - which this one
+        writes, so it cannot also read them.
         """
+        freeze = ctx.triggered_id == "dims"
+        single = [{"label": " Show it on the map", "value": "on"}]
+
+        def ticks(options, value):
+            return ((no_update, no_update) if freeze else (options, value))
+
         overlay = _retrieval_overlay(hits_payload)
         if overlay is None:
-            return {"display": "none"}, "", {"display": "none"}
-        n = len(overlay["hit_points"])
-        query = overlay["query_label"] or "an OSDR sample"
+            return ({"display": "none"}, {"display": "none"},
+                    *ticks(single, ["on"]))
+
         frame_style = {} if dims == "2d" else {"display": "none"}
-        return {}, [
-            html.B(query.split("|")[-1]),
-            f" and its {n} nearest ARCHS4 neighbour{'s' if n != 1 else ''}, "
-            "drawn where they sit in the space.",
-        ], frame_style
+        if len(overlay["cohorts"]) < 2:
+            return {}, frame_style, *ticks(single, ["on"])
+        options = [
+            {"label": f"  {c['label'] or 'cohort'}", "value": key}
+            for c, key in zip(overlay["cohorts"], ("on", ROLE_B))
+        ]
+        return {}, frame_style, *ticks(options, ["on", ROLE_B])
+
+    @app.callback(
+        Output("retrieval-summary", "children"),
+        Input("hits-store", "data"),
+        Input("show-retrieval", "value"),
+    )
+    def describe_the_retrieval(hits_payload, show_retrieval):
+        """One line saying what the ticks are currently drawing.
+
+        This used to be the map's only key for the retrieval: a swatch per
+        cohort and a paragraph explaining that a ring inside a square is a hit
+        both arms found. All of that moved onto the plot, into
+        `layout.retrieval_key_children`, next to the marks it decodes - the
+        ticks directly above already carry each cohort's name, so the rail was
+        naming them twice and explaining glyphs nowhere near them.
+
+        What is left is the control's own feedback, and it reads the ticks
+        rather than the payload so a hidden arm is reported as hidden.
+        """
+        full = _retrieval_overlay(hits_payload)
+        if full is None:
+            return ""
+
+        roles = _roles_from_checklist(show_retrieval)
+        shown = [c for c in full["cohorts"] if c["role"] in roles]
+        if not shown:
+            # The tick hides the overlay outright, and saying so is the whole
+            # job of this line. It used to describe the retrieval regardless,
+            # so unticking left the rail asserting glyphs "drawn where they sit
+            # in the space" over a map with none of them on it.
+            return ("Not drawn. Tick it above to put it back on the map."
+                    if len(full["cohorts"]) < 2 else
+                    "Neither arm is drawn. Tick one to put it back on the map.")
+
+        if len(full["cohorts"]) < 2:
+            n = len(set(full["hit_points"]))
+            query = full["query_label"] or "an OSDR sample"
+            return [
+                html.B(query.split("|")[-1]),
+                f" and its {n} nearest ARCHS4 neighbor{'s' if n != 1 else ''}, "
+                "drawn where they sit in the space.",
+            ]
+
+        if len(shown) < 2:
+            return [html.B(shown[0]["label"] or "One arm"),
+                    " only. Tick both to see which samples they share."]
+        # Distinct samples, not drawn marks. `hit_points` is a concatenation
+        # across the arms, so a hit both retrieved appears in it twice - and
+        # quoting its length made the rail say "10 hits, 2 of them retrieved by
+        # both" for the same search whose banner on the other view said "share
+        # 2 of 8 retrieved samples". Two surfaces, one comparison, two numbers.
+        n_shared = len(full["shared_points"])
+        n_hits = len(set(full["hit_points"]))
+        return [
+            "Both arms drawn, ",
+            html.B(f"{n_hits}"), " samples retrieved, ",
+            html.B(f"{n_shared}"), " of them by both.",
+        ]
 
     @app.callback(
         Output("viewport-store", "data"),
@@ -305,15 +515,19 @@ def register(app):
         State("hits-store", "data"),
         State("method", "value"),
         State("dims", "value"),
+        # Frame what is actually on screen: with one arm of a comparison
+        # unticked, framing both would zoom out past everything drawn.
+        State("show-retrieval", "value"),
         prevent_initial_call=True,
     )
     def update_viewport(relayout, method, dims, _frame_clicks, hits_payload,
-                        method_state, dims_state):
+                        method_state, dims_state, show_retrieval):
         from dash import ctx
         if ctx.triggered_id in ("method", "dims"):
             return None  # reset zoom when the projection changes
         if ctx.triggered_id == "frame-retrieval":
-            return _frame_for(hits_payload, method_state, dims_state)
+            roles = _roles_from_checklist(show_retrieval) or (ROLE_A, ROLE_B)
+            return _frame_for(hits_payload, method_state, dims_state, roles)
         vp = _viewport_from_relayout(relayout)
         if vp == "unchanged":
             return no_update

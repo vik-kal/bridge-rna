@@ -7,11 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Bridge RNA is one application with two views**, developed by the Space Biosciences Research Branch at NASA Ames Research Center.
 
 - **Retrieve** (`/`) takes one NASA OSDR spaceflight RNA-seq sample and returns its closest Earth analogs out of the 940,455-sample ARCHS4/GEO index, as a network graph with an inspector and an optional LLM summary. Code in `bridge_rna/`.
-- **Map** (`/map`) zooms out to the whole space: the 512-d ExpressionPerformer embeddings of both corpora - OSDR (2,108 NASA GeneLab spaceflight samples) and ARCHS4 (940,455 GEO samples) - reduced into one shared 2D/3D space, every one of the 942,563 points drawn as a live WebGL glyph and coloured by biology. Code in `manifold/` and `precompute/`.
+- **Map** (`/map`) zooms out to the whole space: the 512-d ExpressionPerformer embeddings of both corpora - OSDR (2,108 NASA GeneLab spaceflight samples) and ARCHS4 (940,455 GEO samples) - reduced into one shared 2D/3D space, every one of the 942,563 points drawn as a live WebGL glyph and colored by biology. Code in `manifold/` and `precompute/`.
 
-`app.py` is the single entry point and owns the header and the router. There is no `app_osdr_dash.py` and no `app_manifold.py`; both were deleted when the two repositories merged on 2026-07-22, and the map's 19 commits are in this history.
+`app.py` is the single entry point and owns the header and the router.
+**The router must decline to repaint a route that is already on screen.** `serve_layout` paints the requested view server-side, but `dcc.Location` publishes `pathname` once it mounts and Dash reads that as a change, so `prevent_initial_call` alone let the router rebuild the view on every load. Rebuilding the retrieval view reads the OSDR catalog, so its response landed a few hundred milliseconds later, on top of whatever the user had done meanwhile - clicking Cohort on arrival opened the cohort panel and then closed it again, 6 times out of 6, while the click's own callback had returned the right answer. `route-store` records what was painted and `app.navigation_for` is the decision, split out so it is testable without Dash plumbing. There is no `app_osdr_dash.py` and no `app_manifold.py`; both were deleted when the two repositories merged on 2026-07-22, and the map's 19 commits are in this history.
 
-**Current state: built, run on the real corpus, and tested.** 208 tests pass in about three seconds, plus 40 browser checks in `tests/e2e_check.py`.
+**Current state: built, run on the real corpus, and tested.** 330 tests pass in about twenty-five seconds, plus 266 browser checks: 50 in `tests/e2e_check.py`, 70 in `tests/e2e_upload_check.py`, and 146 in `tests/e2e_cohort_check.py`.
+Each browser suite counts and prints what it actually ran, because the documented totals were hand-written and had drifted.
 The ARCHS4 GEO metadata join is built (`cache/archs4_metadata.parquet`, 940,455 rows, 51,284 distinct GEO series), so the map colors by tissue across both corpora rather than by species alone.
 
 ### The join between the halves, and why retrieval is fast
@@ -27,6 +29,54 @@ So a query needs no subprocess and no network: **0.8 s against 22.1 s**, with `g
 
 `search_hits` returns `(hits, mode)` where mode is `cached`, `precomputed`, or `demo`, and **the interface must always say which ran**.
 It did not, once: the status banner special-cased only `precomputed`, so every cached result was announced as "real demo script output".
+The banner label now comes from one shared `_retrieval_phrase(mode)` in `bridge_rna/callbacks.py`, so a new path names itself there rather than in a callback body.
+
+**A fourth path exists for a sample the corpus never embedded: file ingestion (mode `"uploaded"`).**
+A user can upload an OSDR counts file, have it embedded live, and get the identical output scored against the same ARCHS4 index.
+It is a fourth *query-vector source*, not a new pipeline - the cosine scan, `_annotate_from_cache`, and the `archs4_index` map join are the cached path's, reused unchanged, so an uploaded hit carries the same schema as a cached one.
+`bridge_rna.retrieval.run_uploaded_retrieval` is the entry point; it embeds via `bridge_rna.retrieval.embed_uploaded_counts`, which shells out to `precompute/embed_upload.py` because **the serving app never imports torch** - the same reason the `demo` path is a subprocess.
+`embed_upload.py` reuses the exact preprocessing symbols from `manifold/bridge_rna.py` and enforces **invariant 1 (the gene-digest gate)** before producing any vector, so an uploaded sample is embedded in the same gene order as the corpus or the embed is refused.
+Verified: embedding an OSDR sample's own counts through this path reproduces its precomputed cached vector at cosine 1.0, max abs diff 0.0 (`tests/test_upload_ingestion.py`).
+Input is mouse Ensembl-indexed counts (OSDR is Mus musculus); a file mapping zero orthologs is rejected, never embedded into a meaningless vector.
+**No metadata is required or accepted** on this path, and none would change anything: the query vector is a pure function of one counts column, so tissue, flight-vs-ground, and accession would only fill the inspector and the summary prompt, never a hit or a score.
+Design doc: `docs/file_ingestion.md`. Format contract and a real working input: `examples/README.md` and `examples/osdr_upload_example.csv`.
+
+**A fifth path pools a whole experimental group into one query: cohort retrieval (mode `"cohort"`).**
+A spaceflight study does not have one sample, it has a group, and a single-sample top-5 is not a stable measurement: two replicates from the same cage share only **0.161** of their top-5 hits, because the entire top-500 of a 940,455-sample index spans a cosine range comparable to the gap between two animals in the same cage.
+Pooling raises leave-one-out top-5 agreement to **0.738**, a **4.6x** gain, and that - not outlier protection - is the case for the feature.
+`bridge_rna/cohorts.py` is the only file that knows what a cohort is, and it deliberately touches no embedding and no memmap: it is metadata grouping plus 512-d arithmetic, testable against the fixture corpus on a machine with neither artifact.
+`bridge_rna.retrieval.run_cohort_retrieval` is the seam, and it reuses the cached path's scan, `_annotate_from_cache` and `archs4_index` join unchanged, so a cohort hit carries the same schema as a single-sample one and costs one memmap pass at any k - a pass that also measures the result's stability, by scoring `2k+1` query vectors instead of one.
+Design and every measurement: `docs/cohort_retrieval.md`; the prior measurement that specified it: `docs/cohort_pooling.md`.
+
+Four things about it are load-bearing.
+
+**A cohort is `(study, tissue, spaceflight arm)` by default, and study is pinned.** That is OSDR's own curated ISA-Tab factor grouping: 212 cohorts with two or more members across 70 studies, median size 10, max 38, covering 2,105 of 2,108 embedded samples. Tissue or arm can be removed to merge cohorts, but **study can never be unticked**, because random samples from one study already reach 0.9805 mean pairwise cosine against 0.9933 for a real cohort - pooling across studies would average across the corpus's strongest batch boundary. Six further facets (sex, strain, genotype, habitat, duration, diet) were offered and **were removed on 2026-08-05, and must not be reintroduced without an argument that answers this**: every one of them could only *split* a cohort, and stability rises steeply with size (measured over all 212 cohorts: 0.34 at k=2 against 0.86 at k>=15), so they traded away the exact quantity the feature exists to buy in return for a contrast the two-arm comparison answers attributably. The columns remain in the parquet and remain map color-bys; re-adding one is a single line in `FACETS` and nothing else hard-codes a facet. The arm is the raw OSDR value rather than the binary Flight/Ground collapse, because a basal animal was sacrificed at experiment start and a vivarium animal never entered flight hardware.
+
+**Each member is L2-normalized before averaging.** This is invariant 2 applied one level up: the raw norm is a transcriptome-concentration axis spanning 3.9x, not a nuisance scale, so averaging raw vectors would let the most concentrated members cast the loudest votes. It is also the maximum-likelihood vMF mean direction, which makes ranking by the pooled vector exactly ranking by the unweighted mean of the members' own cosines - one animal, one vote. Measured, it changes almost nothing *here* (median cos 0.9999995 against the raw mean, since within-cohort norm spread is 1.09x) and it is kept because it becomes correct the moment anyone unticks Tissue.
+
+**Result stability is measured on the query that just ran, and it lives on the right, after the search.** This changed on 2026-08-06 and the previous design must not come back. It used to be `STABILITY_BY_K`, a bucketed curve of leave-one-out top-5 agreement against cohort size measured over all 212 cohorts, quoted on the **rail** the moment a cohort was selected. The number was real and the label was accurate, and it was still misleading where it sat: a population average printed beside one cohort's name is read as a property of *that* cohort, and the spread inside a size bucket is most of the range. Measured live, a cohort of 7 scores **0.316** and a cohort of 6 scores **0.849**, and the curve told both of them 0.72; OSD-137's two 6-animal liver arms measure 0.59 and 0.64 against the same 0.72. So `retrieval.run_cohort_retrieval` now scores every leave-one-out pool **and** every member alone in the same memmap pass, and `cohorts.StabilityMeasurement` reports the mean Jaccard overlap between the list on screen and the list each member's absence would have produced, **at the depth the slider is on** rather than at a fixed 5. The single-sample baseline beside it is measured the same way, on the same cohort, in the same pass, which is what replaced the fixed `SINGLE_SAMPLE_STABILITY = 0.16`. Design, measurements and rejected alternatives: `docs/live_stability.md`.
+
+Four things about it are load-bearing. **The rail states only what is true before a search** - the role, the name, and how many samples are about to be pooled - because a measured number does not exist until the query runs, and putting one under the picker would mean either a memmap pass per dropdown change or the previous cohort's figure sitting under the current cohort's name. **The panel is above the inspector, not inside it**, so clicking a hit does not scroll away the number describing the whole result. **A comparison measures both arms separately**, since an overlap of 0.25 between two arms at 0.86 is a different finding from 0.25 between one at 0.86 and one at 0.31. **It costs one memmap pass**: 2k+1 query vectors are built before the index is touched and scored together, measured at 0.44 s for 1 query and 1.00 s for the 77 a 38-animal cohort needs.
+
+`LOW_N_THRESHOLD` is 5 and survives, because that question - how large should a cohort be - is the one the curve can answer honestly, and the picker is the one place where size is all that is known. `precompute/validate_cohorts.py` check 5 still measures the curve and now **fails** if the knee moves away from 5, but only on a full sweep: on a `--cohorts 40` sample the knee lands at 10, from buckets standing on one cohort each, which is exactly the noise the bucketing exists to survive. `cohorts.STABILITY_FLOOR` is that same 0.70, applied to the measurement rather than to size standing in for it.
+
+`R̄`, the vMF resultant length labelled "Group tightness", was **removed on 2026-08-05** for a related reason: across all 212 real cohorts its median is 0.9991 and it is no lower at k=2 than at k=30, so it never separated a trustworthy group from an untrustworthy one, while a number pinned within a thousandth of its maximum reads as a grade. `resultant_length` is deleted rather than left unused; the measurement survives in `docs/cohort_pooling.md`. The **per-member** leave-one-out cosine stays in the member list, because that one varies and names an animal - and the panel names the animal whose absence moves the result furthest for the same reason.
+
+**The two-arm comparison runs two independent pooled queries and reports their overlap. It is never a difference vector.** `centroid(flight) - centroid(ground)` is not a transcriptome, so cosine-ranking an index of profiles against it is a category error, and the corpus-level version was already built and rejected (r = -0.990 with PC1, beaten by one in ten random relabelings). Only siblings differing in **exactly one facet** are offered, so the reported Jaccard overlap is attributable to that facet.
+
+The map draws **every pooled member**, not one point: a cohort's query vector is a mean, no projection was fit on it, and inventing a coordinate for it would be a lie. `manifold/callbacks._retrieval_overlay` reads `member_ids` from the payload for that.
+
+**A comparison draws both cohorts, and the two channels it uses are not interchangeable.** Until 2026-08-05 the map drew cohort A alone and said nothing about the other arm, which is an omission rather than a limitation - B's hits already carried `archs4_index`. `_retrieval_overlay` now returns a `cohorts` list with the flat `hit_points`/`query_points`/`query_point`/`query_label` keys as the **union** across it, which is what lets `_frame_for` and the retrieval summary handle a comparison without either learning what one is. **Hue tells you which cohort a member belongs to; ring shape tells you which cohort retrieved a hit, and the rings stay white.** That is measured: the comparison network's blue, warm and teal score 1.03, 1.00 and 1.07 to 1 against the worst categorical tissue hue on `PLOT_BG`, which is the same finding `theme.py` records as the reason a hit ring is white at all. Both hit symbols (`circle-open`, `square-open`) are in `Scatter3d`'s vocabulary, so 2-D and 3-D encode a hit identically. **A shared hit is emergent, never computed** - it is in both hit lists so it receives both traces and draws as a ring inside a square, which is why the map's shared count cannot drift from the banner's. Only the *hover* reads across the arms, and it has to: two traces sit at one coordinate and Plotly resolves one tooltip per position, so building each cohort's rows from its own hit list alone left one arm's rank and cosine unreachable on exactly the points a comparison exists to show - while `render.py` justified dropping the rank numerals on the grounds that the hover said more. It does now. The `show-retrieval` tick becomes one per cohort, and framing follows the ticks. Section 9 of `docs/cohort_retrieval.md` carries the measurements and the rejected alternatives (a convex-hull footprint, connecting polylines, a dedicated shared hue).
+
+**The two views agree that teal is cohort A and warm is cohort B.** `GRAPH_THEME` gained `cohort_a`/`cohort_b`/`cohort_shared`, and cohort A was swapped to teal with "retrieved by both" taking blue. That fixed a live inconsistency: teal is the query star in the single-query network and the query mark on the map, so running a comparison used to silently recolor the star the previous search had drawn teal.
+
+**Cohort B's hex cannot agree across the views, so the binding is its name.** It is `#d9791b` in the retrieval network and `#ffc233` on the map, and neither can take the other's place: `#ffc233` measures about 1.8:1 on white, and `#d9791b` sits 0.3 dE from `CATEGORICAL[3]` under deuteranopia, unusable beside eleven tissue hues on navy. Both measurements are in `manifold/theme.py`. So every surface prints the cohort's own **name** beside its own mark - the two rail cards, the network's band labels, the map's per-cohort tick, and the map's key rows - and nothing asks the reader to carry a hue across the two views. Cohort A survives the trip unchanged at `#0bab9f`, which is what made the difference read as a different arm rather than a different surface.
+
+**A comparison runs two pooled queries, so both surfaces describe two.** Arming one used to leave the second query's size stated nowhere while both the network figure and the map gave it a color and drew it. That is not symmetry: an overlap of 0.25 between a 12-animal cohort measuring 0.86 and a 2-animal cohort measuring 0.31 means something different from the same 0.25 between two cohorts of twelve, and the number that decides how much of it to believe was not on screen. Each pooled query now carries a card under its own picker - the selected cohort under the Cohort dropdown, the sibling under "Compare against" - which is the rail's standing rule and keeps the member ticks, which belong to cohort A alone, beside cohort A's card. The role line (`● COHORT A`, `● COHORT B · differs by spaceflight arm`) appears **only when there are two**; a lone cohort gets no letter, because there is nothing to distinguish it from. Its dot and left rule are `--accent-teal` and `--accent-warm`, which *are* `GRAPH_THEME`'s `cohort_a` and `cohort_b`.
+
+`precompute/validate_cohorts.py` is the honesty gate and must keep passing: identity, leave-one-out stability, a structure-free null, a within-study null, the stability curve, and spherical-versus-raw normalization. It scores 9,270 query vectors in one 73-second memmap pass. Its identity check is worth reading before touching the estimator: pooling one sample perturbs the query vector by one float32 ulp, which is enough to permute ranks at an **exactly 0.0** score gap, so the gate is float32 score agreement plus an identical top-20 rather than an identical top-100.
+
+An uploaded file is **staged**, not merely written: `bridge_rna.callbacks._upload_dir` owns one directory per process, a session's previous file is unlinked when its next upload arrives, and a directory abandoned by a killed process is reaped by the next run. The reaping is PID-tagged rather than signal-based because `atexit` does not run on SIGTERM or SIGKILL and a signal handler is not available either - uploads arrive on Dash's request threads, and `signal.signal` may only be called from the main one. Before this, every upload leaked its counts matrix into the system temp directory forever.
 
 ### Two retrieval tiers, not three
 
@@ -85,6 +135,8 @@ build_projections.py -> pca/umap/tsne coord pqs   + archs4_metadata + projection
 fetch_archs4_meta.py -> archs4_metadata parquet
    (HTTP JSON API, ~35 s, no HDF5 download)
 validate_artifacts.py -> exit code, gates a build
+validate_cohorts.py  -> exit code, gates cohort pooling
+   (6 checks over all 212 cohorts, one memmap pass)
 ```
 
 The **map view** opens no embeddings, computes no statistics, and never touches a Git LFS object.
@@ -96,6 +148,9 @@ The whole live cache measures 217.8 MB, of which the app opens 80.8 MB; the rest
 
 ```
 app.py                   the only entry point: header, router, both views on :8050
+bridge_rna/cohorts.py    what a cohort is: three facets, grouping, the vMF
+                         estimator, leave-one-out cosines, low-N tiering. Opens
+                         no embedding and no memmap.
 bridge_rna/              the retrieval half (config, util, preflight, osdr, ai, geo,
                          figures, retrieval, panels, layout, callbacks)
 manifold/paths.py        every artifact path, one place; env-overridable
@@ -170,12 +225,34 @@ The availability predicate is `data.archs4_metadata_available` itself, never a r
 Four consequences are deliberate and should survive future edits.
 The menu lists whole-map fields first and labels each with its scope ("Tissue · whole map", "Flight vs Ground · OSDR only", "... · unavailable").
 A field with no data at all is shown and disabled with the command that enables it, because hiding it makes the app look like it never had the feature.
-A coverage bar and an exact point count sit directly under the control, amber rather than red, since an OSDR-only field is working correctly and not failing.
+A coverage bar sits directly under the control, amber rather than red, since an OSDR-only field is working correctly and not failing; the exact point count sits beside it **only when coverage is partial**, because the readout exists to answer "why is most of my map not colored?" and a whole-map field never raises that question - a full bar says it, and "Colors all 942,563 points." only said it again in words.
 One palette is shared across both corpora: categories are ranked once over the whole covered population, so a liver in GEO and a liver in OSDR get the same color and each category keeps its color and its place in the legend across every budget and zoom.
 The legend *count*, by contrast, is the number of points actually on screen: `render._legend_with_drawn_counts` recomputes it per figure from the drawn ARCHS4 sample plus the OSDR overlay, and a category with nothing currently drawn drops out of the key, because a legend count is read as "how many of these am I looking at", not "how many exist".
 
 ARCHS4 traces carry no `customdata`; it existed only to feed the lasso and cost about 600 KB of dead payload per figure.
 The OSDR overlay keeps `[sample_key, category]` for hover.
+
+### The key on the plot keys every mark, not just hue
+
+Design doc, with the full audit and the rejected alternatives: `docs/map_key.md`.
+
+With a comparison drawn the map carries **four** encodings at once - corpus glyph hue, member fill hue, hit ring shape, and corpus glyph shape - and until 2026-08-06 it explained one.
+Ring shape, the channel that says which cohort retrieved a hit, had no key anywhere; neither did the diamond that has meant "one of the 2,108 spaceflight samples" since the map was built.
+The floating panel is now the whole key: a retrieval section, the color list, and a corpus shape footer, in that order because that is how transient each is, and only the color list scrolls.
+
+Four things about it are load-bearing.
+
+**A comparison is grouped by role, not by cohort.** The encoding has two factors and they do not share a channel, so the two member rows sit adjacent and differ only in hue, and the two hit rows sit adjacent and differ only in shape. The reader sees each channel vary with the other held fixed. That layout *is* the explanation, which is what lets the sentence explaining it be deleted rather than reworded. Grouping by cohort was built first and buries exactly the thing worth showing.
+
+**Shapes are CSS; hues come from `theme` through an inline style.** The rail's old swatches mirrored `RETRIEVAL_QUERY` and `RETRIEVAL_QUERY_B` into `map.css` by hand, because Plotly cannot read a CSS variable. There is now no second copy to drift, and `test_the_map_key_reads_its_hues_from_the_theme` asserts both halves: the key carries the theme's values, and neither hex appears in `map.css` again. A new glyph shape needs a `.bm-key-glyph.is-<shape>` rule, pinned by `test_the_key_glyph_shapes_all_have_a_stylesheet_rule` - the class is interpolated from the shape name, so it never appears in a `className` literal and the general classname test cannot see it.
+
+**The key must follow the plot into 3-D.** `Scatter3d` rejects `star`, so a member draws as a diamond there and so does the key. A key asserting a mark 3-D does not draw is worse than the silence it replaced - which is also why the 3-D OSDR fix below was a prerequisite rather than a bonus.
+
+**A single query does not pay for the comparison.** A plain search gets two rows, no headings and no names. An uploaded sample gets one, because it was never embedded into this map and draws no member mark.
+
+The plot badges stay. They answer *what is drawn right now* and change on every zoom, where the key answers *what does this mark mean*; folding them together would make the key change on zoom.
+
+**3-D used to discard the OSDR overlay's symbol and its white ring.** `_scatter`'s `Scatter3d` branch passed no `symbol` and hard-coded `line=dict(width=0)`, so 2,108 spaceflight samples arrived as plain circles in the same palette hue as the 940,455 beneath them, contradicting `render.py`'s own docstring. `test_osdr_markers_are_visually_distinct_from_the_cloud` missed it because it only ever ran `("pca", "2d")`. Both channels survive the trip: `diamond` is in `Scatter3d`'s vocabulary and gl-scatter3d honors `marker.line` as a border.
 
 ### The shared tissue vocabulary
 
@@ -265,8 +342,10 @@ Run the pipeline in this order; `fetch_archs4_meta.py` joins onto the identity t
 /Users/josh/Bridge-RNA/.venv/bin/python precompute/validate_artifacts.py --mixing --quality
 /Users/josh/Bridge-RNA/.venv/bin/python app.py                          # http://127.0.0.1:8050
 
-/Users/josh/Bridge-RNA/.venv/bin/python -m pytest tests/ -q              # 208 tests, about three seconds
-/Users/josh/Bridge-RNA/.venv/bin/python tests/e2e_check.py               # 40 browser checks, about two minutes
+/Users/josh/Bridge-RNA/.venv/bin/python -m pytest tests/ -q              # 330 tests, about twenty-five seconds
+/Users/josh/Bridge-RNA/.venv/bin/python tests/e2e_check.py               # 50 browser checks, about three minutes
+/Users/josh/Bridge-RNA/.venv/bin/python tests/e2e_upload_check.py        # 70 upload checks, about eight minutes
+/Users/josh/Bridge-RNA/.venv/bin/python tests/e2e_cohort_check.py        # 146 cohort checks, about four minutes
 ```
 
 **The build is no longer a ten-minute job.** PCA is seconds and UMAP is about fourteen minutes, but t-SNE dominates everything, and almost all of that is the 3-D fit: openTSNE's FIt-SNE interpolation refuses more than two output dimensions, so 3-D falls back to Barnes-Hut, which is `n log n` with a much larger constant.

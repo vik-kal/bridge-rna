@@ -15,6 +15,7 @@ from typing import Any
 
 from dash import dcc, html
 
+from . import cohorts as C
 from .config import DEFAULT_ENTREZ_EMAIL, OSDR_METADATA_PATH
 from .figures import _empty_network_figure
 from .osdr import _eligible_osdr_count, load_osdr_samples
@@ -55,30 +56,218 @@ def _initial_study() -> str:
     return default_study
 
 
-def build_graph_legend() -> Any:
-    """Horizontal legend strip explaining node shapes/colors + edge encoding."""
+# --- The query source switch -------------------------------------------------
+#
+# One list drives the tablist, the panels, the action buttons and the callback
+# that swaps between them, so a fourth query source is one entry here rather
+# than four edits that can disagree. Same reason `app.ROUTES` exists.
+QUERY_MODES = (
+    {"key": "sample", "label": "Sample",
+     "hint": "One OSDR sample against every ARCHS4 sample.",
+     "button_id": "search-button", "button_label": "Search"},
+    {"key": "cohort", "label": "Cohort",
+     "hint": "A whole experimental group, pooled into one query.",
+     "button_id": "cohort-search-button", "button_label": "Search cohort"},
+    {"key": "upload", "label": "Upload",
+     "hint": "A counts file the corpus has never seen, embedded live.",
+     "button_id": "upload-search-button", "button_label": "Embed & search"},
+)
+DEFAULT_QUERY_MODE = QUERY_MODES[0]["key"]
+
+
+def build_mode_switch(active: str = DEFAULT_QUERY_MODE) -> Any:
+    """The Sample / Cohort / Upload segmented control.
+
+    A tablist rather than three stacked control groups. The rail used to show
+    the sample picker and the upload dropzone at the same time, which asked the
+    reader to work out which one was armed; only one query source can run, so
+    only one is shown. The rail is shorter for it, not longer.
+
+    Built from real buttons with `role="tab"` rather than from a styled
+    `dcc.RadioItems` for two reasons: the semantics are exactly a tab set, since
+    each one swaps a panel, and it keeps the markup ours rather than depending
+    on Dash's internal class names, which changed under us once already between
+    major versions.
+    """
     return html.Div(
-        className="graph-legend",
+        className="mode-switch",
+        role="tablist",
+        **{"aria-label": "Query source"},
         children=[
-            html.Div(className="legend-item", children=[
-                html.Span(className="legend-swatch legend-swatch--star"),
-                html.Span("OSDR query"),
-            ]),
-            html.Div(className="legend-item", children=[
-                html.Span(className="legend-swatch legend-swatch--circle"),
-                html.Span("GSM sample (ARCHS4 hit)"),
-            ]),
-            html.Div(className="legend-item", children=[
-                html.Span(className="legend-swatch legend-swatch--diamond"),
-                html.Span("GSE study"),
-            ]),
-            html.Span(className="legend-divider"),
-            html.Div(className="legend-note", children=[
-                html.Span(className="legend-edge"),
-                html.Span("edge width = cosine similarity"),
-            ]),
+            html.Button(
+                m["label"],
+                id=f"mode-tab-{m['key']}",
+                className="mode-tab" + (" is-active" if m["key"] == active else ""),
+                n_clicks=0,
+                role="tab",
+                **{"aria-selected": "true" if m["key"] == active else "false",
+                   "aria-controls": f"mode-panel-{m['key']}"},
+            )
+            for m in QUERY_MODES
         ],
     )
+
+
+def build_cohort_facet_chips() -> Any:
+    """The Group by row: which columns define a cohort.
+
+    Every chip is a button rather than a checkbox because the pinned one has to
+    be legible as "this is part of the definition and cannot be removed" rather
+    than as "disabled control", and a disabled checkbox reads as the latter.
+    """
+    return html.Div(
+        className="facet-chips",
+        role="group",
+        **{"aria-label": "Facets that define a cohort"},
+        children=[
+            html.Button(
+                f.label,
+                id={"type": "facet-chip", "key": f.key},
+                className=("facet-chip"
+                           + (" is-on" if f.default else "")
+                           + (" is-pinned" if f.pinned else "")),
+                n_clicks=0,
+                disabled=f.pinned,
+                title=(f.reason if f.pinned else
+                       f"Group cohorts by {f.label.lower()}"),
+                **{"aria-pressed": "true" if f.default else "false"},
+            )
+            for f in C.FACETS
+        ],
+    )
+
+
+def build_cohort_panel() -> Any:
+    """Cohort mode: define the group, search it, then read how far it held up.
+
+    That order is deliberate and changed on 2026-08-06. Result stability used to
+    be predicted from cohort size and shown here on selection; it is measured on
+    the query now, so it cannot appear until the search has run and it lives in
+    the inspector rather than on this rail.
+    """
+    return html.Div(
+        id="mode-panel-cohort",
+        className="mode-panel",
+        role="tabpanel",
+        style={"display": "none"},
+        children=[
+            html.Div(
+                className="control",
+                children=[
+                    html.Label(
+                        ["Group by ",
+                         html.Span("what makes these one cohort",
+                                   className="control-hint")],
+                        className="control-label",
+                    ),
+                    build_cohort_facet_chips(),
+                    # The rail's rule: the fact that qualifies a control sits
+                    # directly under that control. This says what the current
+                    # definition produced, so it belongs here and not in a
+                    # summary elsewhere.
+                    html.Div(id="cohort-facet-summary", className="facet-summary"),
+                ],
+            ),
+            html.Div(
+                className="control",
+                children=[
+                    html.Label("Cohort", className="control-label"),
+                    dcc.Dropdown(id="cohort-dropdown", clearable=False,
+                                 placeholder="Select a cohort"),
+                ],
+            ),
+            html.Div(id="cohort-card", className="cohort-card-slot"),
+            html.Details(
+                className="cohort-members",
+                children=[
+                    html.Summary(id="cohort-members-summary",
+                                 className="cohort-members-summary",
+                                 children="Members"),
+                    html.Div(
+                        className="cohort-members-body",
+                        children=[
+                            html.Div(
+                                "Untick a sample to leave it out of the pool.",
+                                className="control-hint"),
+                            dcc.Checklist(id="cohort-members",
+                                          className="member-list",
+                                          options=[], value=[]),
+                        ],
+                    ),
+                ],
+            ),
+            html.Div(
+                className="control",
+                children=[
+                    html.Label(
+                        ["Compare against ",
+                         html.Span("optional", className="control-hint")],
+                        className="control-label",
+                    ),
+                    dcc.Dropdown(id="cohort-compare-dropdown", clearable=True,
+                                 placeholder="Nothing - search this cohort alone"),
+                    html.Div(id="cohort-compare-hint", className="control-hint"),
+                ],
+            ),
+            # The second pooled query gets its own card, under its own picker,
+            # for the same reason the first one sits under the cohort dropdown:
+            # the fact that qualifies a control belongs against that control. A
+            # comparison runs two independent pooled queries and the interface
+            # used to state the size and stability of only one of them, while
+            # giving the other a color in the network figure and on the map.
+            html.Div(id="cohort-compare-card", className="cohort-card-slot"),
+            dcc.Store(id="cohort-facets-store",
+                      data=list(C.DEFAULT_FACETS)),
+        ],
+    )
+
+
+# What the canvas is showing, said two ways: the strip above the plot and the
+# subtitle in the panel header. Both are driven from here so they cannot drift
+# apart, and so neither can keep describing a single-query network while a
+# two-cohort comparison is on screen - which is the same failure as a status
+# banner naming the wrong retrieval path.
+CANVAS_SUBTITLES = {
+    "sample": "OSDR query → nearest ARCHS4 GSM samples → GSE studies",
+    "cohort": "Pooled OSDR cohort → nearest ARCHS4 GSM samples → GSE studies",
+    "comparison": "Two pooled cohorts, scored separately → what each retrieved, "
+                  "and what both did",
+}
+
+
+def build_graph_legend(kind: str = "sample") -> Any:
+    """Horizontal legend strip explaining node shapes/colors + edge encoding.
+
+    The comparison figure draws no GSE nodes and two query stars whose colors
+    carry meaning, so it gets a different strip: the color key lives in the
+    figure's own legend, and this one is left to say what the marks are.
+    """
+    query_label = {"sample": "OSDR query",
+                   "cohort": "Pooled cohort query",
+                   "comparison": "Pooled cohort queries (2)"}[kind]
+    items: list[Any] = [
+        html.Div(className="legend-item", children=[
+            html.Span(className="legend-swatch legend-swatch--star"),
+            html.Span(query_label),
+        ]),
+        html.Div(className="legend-item", children=[
+            html.Span(className="legend-swatch legend-swatch--circle"),
+            html.Span("GSM sample (ARCHS4 hit)"),
+        ]),
+    ]
+    if kind != "comparison":
+        items.append(html.Div(className="legend-item", children=[
+            html.Span(className="legend-swatch legend-swatch--diamond"),
+            html.Span("GSE study"),
+        ]))
+    items.append(html.Span(className="legend-divider"))
+    items.append(html.Div(className="legend-note", children=[
+        html.Span(className="legend-edge"),
+        html.Span("edge width = cosine similarity"
+                  + (", color = which cohort retrieved it"
+                     if kind == "comparison" else "")),
+    ]))
+    return items
 
 
 def build_view() -> html.Div:
@@ -107,10 +296,17 @@ def build_view() -> html.Div:
                         children=[
                             html.H2("Search controls", className="sidebar-title"),
                             html.Div(
-                                className="control-group",
+                                className="control-group control-group--query",
                                 children=[
-                                    html.Div("Query sample", className="control-group-title"),
+                                    build_mode_switch(),
+                                    html.Div(id="mode-hint", className="mode-hint",
+                                             children=QUERY_MODES[0]["hint"]),
+                                    # Shared by Sample and Cohort, because both
+                                    # ask the catalog and a reader who has picked
+                                    # a study should not have to pick it twice
+                                    # to look at the same study two ways.
                                     html.Div(
+                                        id="study-group",
                                         className="control",
                                         children=[
                                             html.Label("OSDR study", className="control-label"),
@@ -123,13 +319,54 @@ def build_view() -> html.Div:
                                         ],
                                     ),
                                     html.Div(
-                                        className="control",
+                                        id="mode-panel-sample",
+                                        className="mode-panel",
+                                        role="tabpanel",
                                         children=[
-                                            html.Label("OSDR sample", className="control-label"),
-                                            dcc.Dropdown(id="sample-dropdown", clearable=False),
+                                            html.Div(
+                                                className="control",
+                                                children=[
+                                                    html.Label("OSDR sample", className="control-label"),
+                                                    dcc.Dropdown(id="sample-dropdown", clearable=False),
+                                                ],
+                                            ),
+                                            html.Div(id="sample-preview", className="sample-preview"),
                                         ],
                                     ),
-                                    html.Div(id="sample-preview", className="sample-preview"),
+                                    build_cohort_panel(),
+                                    html.Div(
+                                        id="mode-panel-upload",
+                                        className="mode-panel",
+                                        role="tabpanel",
+                                        style={"display": "none"},
+                                        children=[
+                                            dcc.Upload(
+                                                id="upload-counts",
+                                                className="upload-dropzone",
+                                                multiple=False,
+                                                children=html.Div([
+                                                    html.Div("Drop a counts file or click to browse",
+                                                             className="upload-dropzone-title"),
+                                                    html.Div(
+                                                        "CSV/TSV, mouse Ensembl gene IDs in column 1, "
+                                                        "samples in columns.",
+                                                        className="upload-dropzone-hint"),
+                                                ]),
+                                            ),
+                                            html.Div(id="upload-preview", className="sample-preview"),
+                                            html.Div(
+                                                id="upload-column-control",
+                                                className="control",
+                                                style={"display": "none"},
+                                                children=[
+                                                    html.Label("Sample column", className="control-label"),
+                                                    dcc.Dropdown(id="upload-sample-column", clearable=False),
+                                                ],
+                                            ),
+                                            dcc.Store(id="upload-store"),
+                                        ],
+                                    ),
+                                    dcc.Store(id="query-mode-store", data=DEFAULT_QUERY_MODE),
                                 ],
                             ),
                             html.Div(
@@ -199,6 +436,14 @@ def build_view() -> html.Div:
                                             # it for the one hit you click, and
                                             # the AI panel fetches it for all of
                                             # them before it writes.
+                                            #
+                                            # That cost used to be spelled out in
+                                            # a hint under the tick. It is gone:
+                                            # the toggle sits inside a disclosure
+                                            # already labelled Optional, the
+                                            # default is off, and the sentence
+                                            # was three lines of rail explaining
+                                            # a control most searches never open.
                                             dcc.Checklist(
                                                 id="biopython-toggle",
                                                 options=[{
@@ -208,13 +453,6 @@ def build_view() -> html.Div:
                                                 value=[],
                                                 className="dash-checklist",
                                             ),
-                                            html.Div(
-                                                "Adds roughly two seconds per hit. "
-                                                "Off, a search is local and instant, and "
-                                                "abstracts are fetched for a hit when you "
-                                                "open it or when the AI hypothesis needs them.",
-                                                className="control-hint",
-                                            ),
                                         ],
                                     ),
                                 ],
@@ -222,8 +460,44 @@ def build_view() -> html.Div:
                             html.Div(
                                 className="control-group",
                                 children=[
-                                    html.Button("Search", id="search-button", n_clicks=0, className="btn-primary"),
-                                    html.Div(id="query-running-indicator", className="running-indicator"),
+                                    # One action slot, three buttons, exactly one
+                                    # of them visible. Keeping three ids rather
+                                    # than relabelling one keeps each mode's
+                                    # callback, disabled rule and running
+                                    # indicator its own, and keeps the action in
+                                    # one place on the rail no matter the mode.
+                                    html.Div(
+                                        id="action-slot-sample",
+                                        children=[
+                                            html.Button("Search", id="search-button",
+                                                        n_clicks=0, className="btn-primary"),
+                                            html.Div(id="query-running-indicator",
+                                                     className="running-indicator"),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        id="action-slot-cohort",
+                                        style={"display": "none"},
+                                        children=[
+                                            html.Button("Search cohort", id="cohort-search-button",
+                                                        n_clicks=0, className="btn-primary",
+                                                        disabled=True),
+                                            html.Div(id="cohort-running-indicator",
+                                                     className="running-indicator"),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        id="action-slot-upload",
+                                        style={"display": "none"},
+                                        children=[
+                                            html.Button("Embed & search uploaded sample",
+                                                        id="upload-search-button",
+                                                        className="btn-primary",
+                                                        n_clicks=0, disabled=True),
+                                            html.Div(id="upload-running-indicator",
+                                                     className="running-indicator"),
+                                        ],
+                                    ),
                                     html.Div(
                                         id="search-status",
                                         children=build_status_banner("Select a sample and run a search.", kind="info"),
@@ -264,14 +538,16 @@ def build_view() -> html.Div:
                                                 children=[
                                                     html.H2("Retrieval network", className="panel-title"),
                                                     html.P(
-                                                        "OSDR query → nearest ARCHS4 GSM samples → GSE studies",
+                                                        CANVAS_SUBTITLES["sample"],
+                                                        id="canvas-subtitle",
                                                         className="panel-subtitle",
                                                     ),
                                                 ],
                                             ),
                                         ],
                                     ),
-                                    build_graph_legend(),
+                                    html.Div(id="graph-legend", className="graph-legend",
+                                             children=build_graph_legend("sample")),
                                     html.Div(
                                         className="graph-wrap",
                                         children=[
@@ -292,6 +568,15 @@ def build_view() -> html.Div:
                     html.Aside(
                         className="inspector",
                         children=[
+                            # Above the inspector, because it describes the whole
+                            # result rather than whichever node is open, and it
+                            # must not scroll away when a hit is clicked. Hidden
+                            # until a pooled cohort has actually been searched:
+                            # a single sample has nothing to leave out, so there
+                            # is no leave-one-out stability to report for it.
+                            html.Div(id="stability-panel",
+                                     className="panel stability-panel",
+                                     style={"display": "none"}),
                             html.Div(id="details-panel", className="panel details-panel"),
                             html.Div(
                                 className="panel ai-panel",

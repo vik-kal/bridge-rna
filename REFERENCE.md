@@ -227,7 +227,7 @@ Measured build cost of the change, same machine, same seed: the k=30 neighbour g
 ### The species separation and the init (2026-07-23)
 
 `n_neighbors` was not the whole story, and this is the part that actually fixed the map's separation.
-The species split - human against mouse, the one colour-by that clearly clears the arbitrary-projection band at eta-squared 0.985 - looked interleaved rather than cleanly split, and `n_neighbors=30` alone did not restore it.
+The species split - human against mouse, the one color-by that clearly clears the arbitrary-projection band at eta-squared 0.985 - looked interleaved rather than cleanly split, and `n_neighbors=30` alone did not restore it.
 The cause was the **initialization**, changed from spectral to PCA on 2026-07-22 in the same commit that removed the landmark transform, and never separately measured.
 
 Isolated on a 120,000-point sample with the graph, `n_neighbors`, metric and seed all held fixed, varying only the init:
@@ -376,7 +376,7 @@ Four library behaviours the code actively depends on, each of which caused a rea
   Components are styled through Dash's own structural classes and its `--Dash-*` tokens.
   Dash's dropdown also has no option-group support, which is why `colorby.menu_options()` carries grouping through ordering plus a scope suffix rather than faked header rows.
 - **pandas 3.0, again, and this one is a memory trap rather than a correctness one**: `.to_numpy()` on a string-dtype Series materializes a *fresh* Python `str` object per element.
-  `render._colour_plan` memoizes one per-point category array per color-by, and as strings that array held 942,563 distinct objects to express 13 distinct values: **127.5 MB measured, per color-by**, or about 1.4 GB across the 11-entry registry, against an app that otherwise opens 80.8 MB.
+  `render._color_plan` memoizes one per-point category array per color-by, and as strings that array held 942,563 distinct objects to express 13 distinct values: **127.5 MB measured, per color-by**, or about 1.4 GB across the 11-entry registry, against an app that otherwise opens 80.8 MB.
   It is stored as `int16` legend slots instead, which is 1.9 MB, and category selection becomes a vectorized integer compare rather than 942,563 Python string comparisons.
   Measured effect on the render path: a warm figure over the whole corpus went from 1.33 s to 0.06 s.
 
@@ -583,6 +583,44 @@ It used to apply only where there was no density raster to carry the shape; with
 `OSDR_HIGHLIGHT #f2a03d` is the single warm color the OSDR overlay takes when the field describes ARCHS4 only.
 The OSDR overlay is always a white-ringed `diamond`, so the 2,108 spaceflight samples stay findable among 940k circles.
 
+### The retrieval overlay, and the two-cohort case
+
+| token | value | role |
+| --- | --- | --- |
+| `RETRIEVAL_QUERY` | `#0bab9f` | cohort A's pooled members; == `ACCENT_TEAL`, the network's query star |
+| `RETRIEVAL_QUERY_RGB` | `11, 171, 159` | the same color, for a computed halo alpha |
+| `RETRIEVAL_QUERY_B` | `#ffc233` | cohort B's members, in a comparison only |
+| `RETRIEVAL_QUERY_B_RGB` | `255, 194, 51` | |
+| `RETRIEVAL_QUERY_SIZE` | 20.0 | px; x0.7 when pooled, x0.5 in 3-D |
+| `RETRIEVAL_QUERY_HALO_SIZE` | 46.0 | a single query point |
+| `RETRIEVAL_QUERY_HALO_SIZE_POOLED` | 32.0 | two or more members |
+| `RETRIEVAL_QUERY_HALO_ALPHA` | 0.50 | at k=1; `halo_rgba` divides by `sqrt(k)`, floored at 0.14 |
+| `RETRIEVAL_HIT_RING` | `#ffffff` | every hit ring, in both cohorts |
+| `RETRIEVAL_HIT_SIZE` / `_B` | 20.0 / 27.0 | B's square circumscribes A's circle |
+| `RETRIEVAL_HIT_SYMBOL` / `_B` | `circle-open` / `square-open` | both valid in `Scatter3d` |
+| `RETRIEVAL_HIT_LINE` | 2.2 | ring stroke width |
+| `RETRIEVAL_DIM_ARCHS4` / `_OSDR` | 0.35 / 0.30 | how far each corpus recedes behind a retrieval |
+| `RETRIEVAL_MAX_NUMERALS` | 25 | rank numerals stop here, and are off entirely in a comparison |
+
+**Which cohort a *member* belongs to is hue; which cohort retrieved a *hit* is ring shape.** Measured, against `PLOT_BG` and the eleven categorical hues:
+
+| candidate | worst contrast vs a categorical hue |
+| --- | --- |
+| `#2b7fff` (network cohort A) | **1.03:1** vs `#3987e5`, the 155,761-point Blood / immune bucket |
+| `#d9791b` (network cohort B) | **1.00:1** vs `#9085e9` |
+| `#0bab9f` (network shared) | **1.07:1** vs `#c98500` |
+| `#ffffff` | **3.07:1** worst case, 16.9:1 vs `PLOT_BG` |
+
+So no hue can carry a hit ring, which is the same finding that made the ring white in the first place.
+Hue is safe on a member because a member is a *filled* mark with a 2 px white outline: its findability comes from the outline, so the fill only has to separate A from B.
+`#ffc233` against `#0bab9f` is CIEDE2000 **43.4** normal, **31.7 / 45.0 / 48.0** under protanopia, deuteranopia and tritanopia, all far above the palette's 8.4 CVD bar; it is 10.5:1 on `PLOT_BG` and 17.0 dE from the nearest categorical hue.
+`ACCENT_WARM #d9791b` was rejected for the map: 0.3 dE from `CATEGORICAL[3]` under deuteranopia.
+
+Neither hex is mirrored into a stylesheet. The map's key sets them inline from `theme` (`manifold/layout._key_glyph`), which is what removed the last place a cohort hue was written twice - the rail's old `.bm-retrieval-swatch.is-a` / `.is-b` rules, deleted 2026-08-06. `test_the_map_key_reads_its_hues_from_the_theme` asserts both halves: the key carries the theme's values, and neither hex appears in `map.css` again.
+
+`bridge_rna/figures.GRAPH_THEME` names the retrieval view's own three roles: `cohort_a #0bab9f`, `cohort_b #d9791b`, `cohort_shared #2b7fff`.
+Cohort A is teal and shared is blue, which is a swap from what shipped first: teal is the query star in the single-query network *and* the query mark on the map, so giving it to "shared" meant running a comparison silently recolored the star the previous search had drawn teal.
+
 Figure `dragmode` is **`pan`**, not `lasso` or `select`, and the graph config removes both `select2d` and `lasso2d` from the modebar.
 There is no selection feature, and a drag that draws a marquee doing nothing would be a promise the app does not keep.
 (For the record: an earlier config removed `select2d` only, so the lasso button was in fact still on the modebar after the rest of the feature had been designed away.)
@@ -721,16 +759,26 @@ It previously demanded the ARCHS4 memmap, `sample_locations.parquet` and the OSD
 
 ### Tests
 
-**160 tests, all passing, in about 1.0 s** (`/Users/josh/Bridge-RNA/.venv/bin/python -m pytest tests/ -q`), measured 2026-07-22 by running the suite.
+**330 tests, all passing, in about 25 s** (`/Users/josh/Bridge-RNA/.venv/bin/python -m pytest tests/ -q`), measured 2026-08-06 by running the suite.
 
 | file | tests |
 | --- | --- |
+| `tests/test_app.py` | 76 |
+| `tests/test_render.py` | 55 |
+| `tests/test_cohorts.py` | 55 |
 | `tests/test_tissue.py` | 46 |
-| `tests/test_render.py` | 34 |
-| `tests/test_app.py` | 27 |
+| `tests/test_retrieval.py` | 30 |
 | `tests/test_data.py` | 22 |
 | `tests/test_colorby.py` | 18 |
-| `tests/test_projections.py` | 13 |
+| `tests/test_projections.py` | 15 |
+| `tests/test_upload_ingestion.py` | 13 |
+
+The rows sum to the headline; regenerate both with `pytest tests/ -q --collect-only`.
+Every row above was regenerated that way on 2026-08-06, which caught two that had drifted independently of this session's work: `test_app.py` was recorded at 63 against an actual 76, so the table summed to 290 while the headline said 307.
+A hand-maintained count is the same failure mode the browser suites fixed by counting themselves.
+
+Plus **266 browser checks**, which are not collected by pytest and need the real cache: 50 in `tests/e2e_check.py`, 70 in `tests/e2e_upload_check.py`, 146 in `tests/e2e_cohort_check.py`.
+These are counted by the suites themselves, not by hand. The previous figures here and in CLAUDE.md disagreed (202 against 173) and neither matched what ran, so each `Checks` instance now reports its own total.
 
 The suite was 103 tests in 4.54 s two sessions ago, and 144 in 0.55 s before this one.
 The runtime fell by 88% mostly because the fixture no longer builds an approximate-nearest-neighbour index, which was 43% of the old wall clock; it rose again to ~1.0 s because `test_projections.py` runs several 512-dimensional eigendecompositions.
@@ -743,7 +791,7 @@ The whole suite runs against a synthetic corpus built into a temp directory by `
 It never touches the 963 MB memmap or the multi-hour embedding artifacts and runs on a machine that has neither.
 The fixture writes a synthetic `archs4_metadata.parquet` whose source strings are in ARCHS4's free-text register (`"liver"`, `"whole blood"`, `"Brain cortex"`, `"HeLa"`, `"left kidney"`, `"skeletal muscle biopsy"`) and maps them through the **real** canonicalizer, so the tests exercise the mapping rather than assuming it.
 `tests/conftest.py` provides a `without_archs4_metadata` fixture that points `ARCHS4_METADATA_PARQUET` at a non-existent file and clears the loader caches on both sides, because the degraded state is what a fresh clone starts in and needs real coverage.
-`render._colour_plan` is cleared there alongside the two data loaders: it memoizes a label array derived from the metadata, and a test proved that leaving it warm let Tissue keep colouring 940,455 ARCHS4 points from a join that no longer existed.
+`render._color_plan` is cleared there alongside the two data loaders: it memoizes a label array derived from the metadata, and a test proved that leaving it warm let Tissue keep coloring 940,455 ARCHS4 points from a join that no longer existed.
 
 `tests/e2e_check.py` sits outside that suite and outside pytest's collection, because it needs the opposite of a hermetic fixture: it boots the real Dash app against the real `cache/` and drives a real browser.
 
@@ -774,3 +822,134 @@ The metadata fetch runs third because it joins onto artifacts `build_projections
 
 Flags that appear in older prose and no longer exist: `--skip-hnsw`, `--density-only`, `--pca-fit-sample`, `--umap-fit-sample`, `--pca-components`.
 The current `build_projections.py` takes `--umap-neighbors`, `--tsne-perplexity`, `--tsne-jobs`, `--pca-report`, `--batch`, `--knn-jobs`, `--seed`, `--archs4-limit`, `--skip-umap`, `--skip-tsne`, `--densmap`, and `--dens-lambda`.
+
+## 13. Cohort retrieval, measured (2026-08-05)
+
+Produced by `precompute/validate_cohorts.py` against the real 963 MB ARCHS4 memmap and the real 2,108 cached OSDR embeddings, over **all 212 cohorts** rather than a sample.
+The whole run is 9,270 query vectors scored in **one 73-second pass** over the memmap, using the same running-top-k streaming technique as `validate_artifacts.py --mixing`.
+Full narrative in `docs/cohort_retrieval.md`; the prior measurement that specified the feature is `docs/cohort_pooling.md`.
+
+### What the user can change, and what was removed (2026-08-05)
+
+The definition is `(study, tissue, spaceflight)`; study is pinned, tissue and arm can be unticked to *widen* it.
+There is no way to narrow it, and that is the whole of the registry.
+
+Six further facets were offered and deleted: `sex`, `strain`, `genotype`, `habitat`, `duration`, `diet`.
+Every one of them could only ever split a cohort, and the stability curve below is a function of size, so they traded away the quantity pooling exists to buy.
+The columns remain in `cache/osdr_metadata.parquet` and remain map color-bys; re-adding one is a single line in `bridge_rna/cohorts.FACETS`, and the deletion touched no other source file, which is the registry design working.
+**Every measurement in this section was taken under `(study, tissue, spaceflight)`, which is exactly what remains, so none of it needs re-measuring.**
+
+`R̄`, the vMF resultant length shown as "Group tightness", was removed in the same pass and `resultant_length` deleted.
+Its measurement stands and is the reason: median **0.9991** over all 212 cohorts, and no lower at k=2 than at k=30.
+A statistic that is always within a thousandth of its maximum grades nothing, while sitting on a card beside one that genuinely varies it reads as a grade.
+The per-member leave-one-out cosine stays: it varies within a cohort and names an individual animal.
+
+### Cohort structure under the default definition `(study, tissue, spaceflight)`
+
+| | |
+| --- | --- |
+| Cohorts with 2 or more members | **212** across 70 studies |
+| Cohorts including singletons | 215 (3 singletons) |
+| Size | median **10**, mean 9.9, max 38 |
+| Samples grouped | **2,105 of 2,108** |
+
+### Leave-one-out stability, pooled against single-sample
+
+| depth | pooled | member vs member | gain |
+| --- | --- | --- | --- |
+| top-5 | **0.738** | **0.161** | 4.6x |
+| top-20 | 0.778 | 0.214 | 3.6x |
+| top-100 | 0.826 | 0.302 | 2.7x |
+
+### The two nulls
+
+| grouping | top-5 stability | margin over it |
+| --- | --- | --- |
+| real cohort | **0.738** | - |
+| k random OSDR samples (structure-free) | 0.331 | **+0.407** |
+| k random samples from the same study | 0.683 | **+0.055** |
+
+The within-study margin is the demanding one and is small.
+It is consistent with the earlier finding that same-study membership alone closes 84% of the distance to a real cohort, and it means a pooled query is a cleaner measurement of "this study's samples" than of "this biology".
+It does not undermine the 4.6x gain over a single sample, which is the claim the interface makes.
+
+### Stability versus cohort size (the curve behind `LOW_N_THRESHOLD`)
+
+Re-measured over all 212 cohorts on 2026-08-06, unchanged from the 08-05 sweep:
+
+| k | cohorts | stability | sd |
+| --- | --- | --- | --- |
+| 2 | 5 | 0.34 | 0.20 |
+| 3 | 22 | 0.51 | 0.27 |
+| 4 | 8 | 0.55 | 0.17 |
+| 5-9 | 70 | 0.72 | 0.18 |
+| 10-14 | 70 | 0.81 | 0.12 |
+| 15+ | 37 | 0.86 | 0.11 |
+
+`bridge_rna.cohorts.LOW_N_THRESHOLD` is **5**, the first bucket to reach 0.70, and `precompute/validate_cohorts.py` check 5 now exits non-zero if a full sweep moves that knee.
+
+Two properties of this table are deliberate.
+It is bucketed rather than per-size because two cohorts per size produced 0.38 at k=5 beside 0.90 at k=6, which is an artifact of the draw.
+The 5-9 row is two buckets merged, because 5-6 scored 0.736 and 7-9 scored 0.696 - an inversion of 0.04 against a within-bucket sd of 0.18 - and a bigger cohort must never be reported as less trustworthy than a smaller one.
+
+**This table no longer reaches the interface, and that is the correction of 2026-08-06.**
+It used to be `cohorts.STABILITY_BY_K`, quoted on the rail's cohort card as soon as a cohort was selected.
+Every row above is a mean over tens of cohorts, and the sd column is the reason it could not describe any one of them: at 0.18 within the 5-9 bucket, "0.72" covers real cohorts measuring 0.316 and 0.849.
+The app measures the statistic per query now, at the retrieval depth on screen, and reports it on the right after the search.
+The constant is deleted; `docs/live_stability.md` carries the design and `tests/test_cohorts.py` pins the deletion.
+
+### Result stability, measured live (2026-08-06)
+
+Measured over 22 real cohorts, one per distinct size, with `bridge_rna.retrieval.run_cohort_retrieval`'s own fused scan:
+
+| depth | pooled | one sample alone | gain |
+| --- | --- | --- | --- |
+| top-5 | 0.745 | 0.101 | 7.3x |
+| top-20 | 0.774 | 0.129 | 6.0x |
+| top-30 | 0.791 | 0.150 | 5.3x |
+
+Deeper lists are slightly more stable, which is what a set-overlap statistic does as the sets grow, and the 0.046 drift across the slider's whole range is why `cohorts.STABILITY_FLOOR` can be a single depth-independent 0.70.
+
+The spread at fixed size is the finding that motivated the change: k=4 measured 0.339, k=6 measured 0.849, k=7 measured 0.316, k=10 and k=35 both measured 1.000.
+On the real app, OSD-137's two 6-animal liver arms measure **0.59** and **0.64**, where the curve told both of them 0.72.
+
+Cost of the fused scan against the real 963 MB memmap, which is what makes measuring it per query affordable:
+
+| query vectors in one pass | wall clock |
+| --- | --- |
+| 1 | 0.44 s |
+| 11 | 0.50 s |
+| 21 | 0.58 s |
+| 41 | 0.77 s |
+| 77 | 1.00 s |
+
+The largest cohort in the corpus has 38 members, so the worst case is 77 vectors and about 0.56 s over the pooled query it already paid for.
+`retrieval._topk_cosine_matrix` is the one implementation of the cosine scan in the repository; `_topk_cosine_from_memmap` is a one-row wrapper and `precompute/validate_cohorts.py`'s `QueryBatch` calls straight into it.
+Verified against the previous standalone single-query scan on the real corpus: identical top-30 in order, maximum score difference **0.0**.
+A batch of queries and a single query agree to about **1.3e-07** rather than bit for bit, because one is a BLAS matrix-matrix product and the other a matrix-vector product; that is a couple of float32 ulps and the same effect the identity check below documents.
+
+### Spherical mean against raw mean
+
+| | |
+| --- | --- |
+| `cos(spherical, raw)` | median **0.9999995**, worst 0.99951 |
+| identical top-5 | 112 of 212 cohorts |
+| L2-norm spread within a cohort | ~1.09x (corpus-wide: 3.9x) |
+
+The normalization changes almost nothing on this corpus, as predicted, and is kept because it becomes the correct estimator the moment Tissue is unticked.
+
+### The identity check, and the float32 floor it exposed
+
+Pooling a single sample normalizes it twice, once in `cohort_query_vector` and once in the scan.
+
+| | |
+| --- | --- |
+| query-vector difference | **7.45e-9** (one float32 ulp), cosine 1.0 |
+| max score difference | **1.19e-7** (float32 eps at magnitude 1) |
+| first differing rank | **23** |
+| score gap at that rank | **exactly 0.0** |
+| identical through | rank 20 in order; rank 50 as a set |
+
+The two runs permute an exact tie rather than disagreeing.
+The gate is therefore float32 score agreement plus an identical top-20 in order, not an identical top-100 - demanding more would demand precision float32 does not have.
+This is the same phenomenon as the rejected kNN tissue-transfer candidate, where the winner beat the runner-up by a median 0.00089 cosine and was "essentially arbitrary", and it is the reason cohort pooling exists.

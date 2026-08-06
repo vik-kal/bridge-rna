@@ -22,10 +22,10 @@ Nothing in the pipeline was told the query was an eye; it found the retina on it
 ### Map (`/map`)
 
 The same space, seen all at once.
-Both collections - 2,108 NASA samples and 940,455 Earth samples - are placed in one shared projection and drawn as live points, coloured by tissue.
-You can rotate it, switch between 2-D and 3-D, recolour it, and overlay a retrieval to see where a query and its matches sit.
+Both collections - 2,108 NASA samples and 940,455 Earth samples - are placed in one shared projection and drawn as live points, colored by tissue.
+You can rotate it, switch between 2-D and 3-D, recolor it, and overlay a retrieval to see where a query and its matches sit.
 
-![The Bridge RNA map: the joint corpus as a 3-D projection, coloured by tissue](docs/bridge-rna-map.png)
+![The Bridge RNA map: the joint corpus as a 3-D projection, colored by tissue](docs/bridge-rna-map.png)
 
 ## How it works
 
@@ -53,6 +53,34 @@ It takes about half a second when the vector is already cached, and about 22 sec
 Every Earth hit's row in the embedding index is also its point on the map, and every OSDR sample is keyed by the same `accession|sample name` string in both halves.
 That shared key is why a retrieval you run on one page can be redrawn in place on the other, with no lookup table between them.
 
+### Querying with a whole experimental group
+
+A spaceflight study does not have one sample, it has a group, and one sample is not a stable question to ask.
+Two mice from the same cage, the same tissue and the same flight condition share only **16%** of their five nearest Earth analogs, and often none at all.
+That is not a defect in either query: the entire top-500 of a 940,455-sample index spans a range of similarity comparable to the gap between two animals in the same cage, so the ordering of the list is decided below the noise floor of the biology.
+
+**Cohort** mode asks the question the study is actually powered to answer.
+It groups the samples the way OSDR already curates them, by study, tissue and flight condition, averages the group's embeddings into one query, and searches with that.
+Measured over all 212 cohorts in the corpus, this raises the agreement of the result list from 0.16 to **0.74**, a 4.6-fold gain, and it still reads the index only once however large the group is.
+
+You can widen what counts as one cohort by dropping tissue or condition, which merges a study's organs or its arms into one larger group.
+Study is always part of the definition and cannot be removed, because samples from one study resemble each other for reasons that include how they were processed, and pooling across studies would average across that.
+Splitting finer than this is deliberately not offered: every further split makes the cohort smaller, and the gain above rises steeply with group size.
+
+**Once the search has run, the app tells you how far to trust that particular result, by measuring it.**
+It re-runs the same query with each animal left out in turn and reports how much of the list survives, alongside what one of those animals alone would have agreed with another, at whatever depth you are reading.
+That replaced a figure looked up from a curve of cohort size, which was a corpus-wide average being shown against one cohort's name: it told every group of five to nine animals 0.72, while real ones in that range measure anywhere from 0.32 to 0.85.
+A result that moves when one animal is dropped is flagged in amber, every member is listed with how far it sits from the rest, and you can exclude one and search again.
+An optional comparison runs a second cohort as its own separate query, so you can ask how much of the Earth that a study's flight animals resemble is also resembled by its ground controls.
+It is deliberately not a flight-minus-ground difference vector: a difference of two directions is not a transcriptome, and an earlier attempt at exactly that turned out to be measuring something else entirely.
+
+Both cohorts are drawn on the map, which is where that comparison is actually settled.
+The overlap the panel reports is a number about two *sets* of hits, and two arms can share no hits at all while sitting in the same neighbourhood, each picking different samples out of the same crowd.
+Each cohort's pooled animals are drawn in its own color, its hits in its own ring shape, and a sample both cohorts retrieved carries both rings.
+You can untick either arm when the picture gets crowded.
+
+Full method and every measurement: [`docs/cohort_retrieval.md`](docs/cohort_retrieval.md), and [`docs/live_stability.md`](docs/live_stability.md) for how the trust number is measured.
+
 ### The map
 
 The map is the same space projected down to two and three dimensions.
@@ -73,23 +101,23 @@ And it separates the two corpora more than UMAP does, which makes it the worst o
 Vectors are L2-normalised before any reduction.
 Without that step the first principal component is really a magnitude axis and holds 57.8% of the variance, swamping the rest; normalised, it drops to 41.3% and the biology comes through.
 
-### Colouring both collections by tissue
+### Coloring both collections by tissue
 
 OSDR and ARCHS4 describe tissue in completely different ways.
 OSDR is curated but hyper-specific ("Right extensor digitorum longus", 48 values in all).
 ARCHS4 has no tissue column at all, only 42,754 distinct free-text GEO strings.
 `manifold/tissue.py` folds both onto one list of 37 anatomical buckets plus "Other" and "Unknown", using ordered keyword rules where the first match wins.
 The order is what keeps "bone marrow" from being read as "bone" and "adrenal" from being read as "renal".
-Because both collections go through the same function, a liver in GEO and a NASA liver get the same colour and the same legend row.
+Because both collections go through the same function, a liver in GEO and a NASA liver get the same color and the same legend row.
 All 48 OSDR values and 90.6% of the Earth samples land in a named bucket.
 
 The map will not paint a collection it cannot describe as though it were data.
 Pick an OSDR-only field like Flight vs Ground and the 940,455 Earth points have no value for it, so rather than a flat grey cloud that reads as "measured and empty", they are drawn as faint context with no legend entry.
-The colour-by menu says up front what each field covers, and a field whose data has not been built is shown disabled with the command that builds it.
+The color-by menu says up front what each field covers, and a field whose data has not been built is shown disabled with the command that builds it.
 
 ### Hovering and inspecting
 
-On the map, hovering an OSDR point shows its name and what it is under the current colouring.
+On the map, hovering an OSDR point shows its name and what it is under the current coloring.
 The Earth cloud carries no hover data on purpose, both for speed at a million points and because a click that returns nothing is how the app knows you clicked the background rather than a sample.
 In the retrieval view, the network graph draws the query, each matched sample, and the studies they belong to; clicking any node opens its full metadata in the inspector and fetches the study abstract from NCBI on demand.
 
@@ -205,12 +233,25 @@ The numbers are meaningless biologically; the corpus exists to exercise the inte
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -q     # runs in about two seconds
-.venv/bin/python tests/e2e_check.py      # drives a real browser; needs the built cache
+.venv/bin/python -m pytest tests/ -q             # 330 tests, about twenty-five seconds
+.venv/bin/python tests/e2e_check.py              # 50 browser checks; needs the built cache
+.venv/bin/python tests/e2e_upload_check.py       # 70 checks of the upload path
+.venv/bin/python tests/e2e_cohort_check.py       # 146 checks of cohort retrieval
 ```
 
-The suite builds its own synthetic corpus in a temp directory and never touches the model checkpoint or the 963 MB memmap, so it runs on a machine that has neither.
-`e2e_check.py` boots the real app against the real `cache/` and asserts on what the page reports about itself, down to each budget tier drawing exactly the point count it advertises.
+The pytest suite builds its own synthetic corpus in a temp directory and never touches the model checkpoint or the 963 MB memmap, so it runs on a machine that has neither.
+The three browser suites boot the real app against the real `cache/` and assert on what the page reports about itself, down to each budget tier drawing exactly the point count it advertises.
+
+Two scripts check the science rather than the software, against the real corpus:
+
+```bash
+.venv/bin/python precompute/validate_artifacts.py --mixing --quality
+.venv/bin/python precompute/validate_cohorts.py   # 6 checks over all 212 cohorts
+```
+
+`validate_cohorts.py` is the honesty gate behind Cohort mode.
+It measures how much a pooled result survives dropping one animal, and holds that against two nulls: a pooled query over random samples, and a pooled query over random samples from the same study.
+The second one is the demanding test, and its result is reported in the docs rather than buried: most of what makes a cohort coherent is the study it came from, so a pooled query is a cleaner measurement of one study's samples than of the biology in general.
 
 ## Project layout
 

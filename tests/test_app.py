@@ -8,6 +8,7 @@ tree, and every className the Python emits must exist in the stylesheet.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -68,9 +69,51 @@ def mounted_ids(app):
     # The shell itself, built outside a request so it takes the default route.
     trees.append(app.layout() if callable(app.layout) else app.layout)
     for tree in trees:
-        ids |= {getattr(c, "id", None) for c in _walk(tree)}
+        ids |= {_id_key(getattr(c, "id", None)) for c in _walk(tree)}
     ids.discard(None)
     return ids
+
+
+def _id_key(component_id):
+    """A hashable, comparable form of a component id.
+
+    Dash ids are either a string or a dict, and the dict form - pattern-matching
+    ids like ``{"type": "facet-chip", "key": "tissue"}`` - is what the cohort
+    facet chips use. A dict is unhashable, so both of the checks in this file
+    used to raise ``TypeError`` the moment a pattern-matching id entered a view
+    rather than reporting on it. They are exactly the ids most worth checking,
+    since a duplicated or misspelled one fails silently in the browser.
+    """
+    if isinstance(component_id, dict):
+        return tuple(sorted((str(k), str(v)) for k, v in component_id.items()))
+    return component_id
+
+
+# The wildcard sentinels Dash serializes into a pattern-matching id.
+_WILDCARDS = ("ALL", "MATCH", "ALLSMALLER")
+
+
+def _resolve_wildcard(ref, mounted_ids):
+    """Return a mounted id that satisfies a pattern-matching reference, or None.
+
+    `None` also means "this was not a pattern id at all", which lets the caller
+    fall back to a literal comparison.
+    """
+    if not (isinstance(ref, str) and ref.startswith("{")):
+        return None
+    try:
+        pattern = json.loads(ref)
+    except ValueError:
+        return None
+    fixed = {str(k): str(v) for k, v in pattern.items()
+             if not (isinstance(v, list) and v and v[0] in _WILDCARDS)}
+    for mounted in mounted_ids:
+        if not isinstance(mounted, tuple):
+            continue
+        as_dict = dict(mounted)
+        if all(as_dict.get(k) == v for k, v in fixed.items()):
+            return mounted
+    return None
 
 
 def test_app_builds(app):
@@ -82,8 +125,24 @@ def test_every_callback_target_exists_in_some_view(app, mounted_ids):
     referenced = set()
     for cb in app.callback_map.values():
         for item in list(cb["inputs"]) + list(cb.get("state", [])):
-            referenced.add(item["id"])
+            ref = item["id"]
+            # A pattern-matching input arrives as a JSON *string* naming a whole
+            # family, e.g. '{"key":["ALL"],"type":"facet-chip"}'. It is satisfied
+            # when some mounted component matches on every non-wildcard key, so
+            # it is resolved here rather than compared literally - a literal
+            # comparison can never match and would make the check unusable for
+            # exactly the ids it is most valuable on.
+            resolved = _resolve_wildcard(ref, mounted_ids)
+            if resolved is not None:
+                referenced.add(resolved)
+            else:
+                referenced.add(_id_key(ref))
     for key in app.callback_map:
+        # A pattern-matching callback's key is a JSON blob, not `id.prop`, so
+        # the regex below would shred it into fragments that match no component.
+        # Those callbacks are already covered by the `inputs` walk above.
+        if key.lstrip().startswith("{") or '{"' in key:
+            continue
         for part in re.findall(r"([A-Za-z0-9_-]+)\.[A-Za-z]", key):
             referenced.add(part)
 
@@ -105,7 +164,7 @@ def test_no_view_contains_a_duplicate_component_id(name):
     from bridge_rna import layout as rna_layout
 
     tree = rna_layout.build_view() if name == "retrieve" else layout.build_view()
-    ids = [i for i in (getattr(c, "id", None) for c in _walk(tree)) if i]
+    ids = [_id_key(i) for i in (getattr(c, "id", None) for c in _walk(tree)) if i]
     duplicated = [i for i, n in collections.Counter(ids).items() if n > 1]
     assert not duplicated, f"{name} view has duplicate ids: {duplicated}"
 
@@ -573,10 +632,17 @@ def test_coverage_states_the_exact_point_count(corpus):
         "the readout must say what happens to the points it does not colour")
 
 
-def test_coverage_says_so_when_a_field_paints_everything(corpus):
-    text = _text(callbacks.coverage_children("species"))
-    assert f"{corpus['total']:,}" in text
-    assert "all" in text.lower()
+def test_coverage_says_nothing_when_a_field_paints_everything(corpus):
+    """The full bar is the whole answer.
+
+    "Colours all 942,563 points." sat under it and only restated the bar in
+    words. The readout exists to answer "why is most of my map not colored?",
+    which is a question a whole-map field never raises, so it now says nothing
+    at all rather than reassuring at length.
+    """
+    children = callbacks.coverage_children("species")
+    assert len(children) == 1, "a whole-map field is the bar and nothing else"
+    assert _text(children).strip() == ""
 
 
 def test_coverage_bar_is_amber_only_for_a_partial_field(corpus):
@@ -614,3 +680,531 @@ def test_the_cross_corpus_caution_is_not_shown_on_the_rail(map_view):
     classes = {getattr(c, "className", "") for c in _walk(map_view)}
     assert not any("bm-caution" in str(c) for c in classes)
     assert "54x" not in _text(map_view)
+
+
+# --- A comparison, translated onto the map -----------------------------------
+
+
+def _comparison_payload(members_a, members_b):
+    """A hits-store payload shaped exactly as `run_cohort_search` writes one."""
+    def hit(i, gsm):
+        return {"gsm": gsm, "score": 0.99, "archs4_index": i}
+    return {
+        "sample_id": "COHORT|study=OSD-1|tissue=Liver|spaceflight=Space Flight",
+        "mode": "cohort",
+        "hits": [hit(0, "GSM1"), hit(1, "GSM2"), hit(2, "GSM3")],
+        "query": {"cohort_label": "Liver · Space Flight", "is_cohort": "1"},
+        "member_ids": list(members_a),
+        "comparison": {
+            "query_b": {"cohort_label": "Liver · Ground Control", "is_cohort": "1"},
+            "hits_b": [hit(1, "GSM2"), hit(2, "GSM3"), hit(5, "GSM6")],
+            "shared": ["GSM2", "GSM3"],
+            "overlap": 0.5,
+            "facet": "spaceflight arm",
+            "member_ids": list(members_b),
+        },
+    }
+
+
+@pytest.fixture
+def two_cohorts(corpus):
+    """Two disjoint groups of real OSDR sample keys from the fixture corpus."""
+    keys = data.osdr_metadata()["sample_key"].astype(str).tolist()
+    assert len(keys) >= 5
+    return keys[:3], keys[3:5]
+
+
+def test_a_comparison_becomes_two_drawable_cohorts(two_cohorts):
+    """The payload already carried everything needed - cohort B's hits have
+    always had `archs4_index` - and the overlay simply never looked at it. A
+    user who ran flight against ground saw one arm and no sign of the other."""
+    a, b = two_cohorts
+    overlay = callbacks._retrieval_overlay(_comparison_payload(a, b))
+    assert overlay is not None
+    assert [c["role"] for c in overlay["cohorts"]] == ["a", "b"]
+    assert [c["label"] for c in overlay["cohorts"]] == ["Liver · Space Flight",
+                                                        "Liver · Ground Control"]
+    assert [len(c["query_points"]) for c in overlay["cohorts"]] == [3, 2]
+
+
+def test_the_flat_keys_are_the_union_of_both_cohorts(two_cohorts):
+    """`_frame_for` and the retrieval summary read the flat keys. Keeping them a
+    union rather than cohort A's own values is what lets both of them frame and
+    describe a comparison without either learning what a comparison is."""
+    a, b = two_cohorts
+    overlay = callbacks._retrieval_overlay(_comparison_payload(a, b))
+    assert overlay["hit_points"] == [p for c in overlay["cohorts"]
+                                     for p in c["hit_points"]]
+    assert overlay["query_points"] == [p for c in overlay["cohorts"]
+                                       for p in c["query_points"]]
+    assert len(overlay["query_points"]) == 5
+
+
+def test_shared_points_are_the_intersection_of_the_two_hit_sets(two_cohorts):
+    a, b = two_cohorts
+    overlay = callbacks._retrieval_overlay(_comparison_payload(a, b))
+    first, second = (set(c["hit_points"]) for c in overlay["cohorts"])
+    assert set(overlay["shared_points"]) == first & second
+    assert overlay["shared_points"], "this fixture is built to share two hits"
+
+
+def test_unticking_an_arm_removes_it_from_everything_downstream(two_cohorts):
+    """The escape hatch when two large cohorts crowd one region. It has to
+    reach the frame as well as the figure, or framing zooms out past what is
+    actually drawn."""
+    a, b = two_cohorts
+    payload = _comparison_payload(a, b)
+    only_a = callbacks._retrieval_overlay(payload, ("a",))
+    assert [c["role"] for c in only_a["cohorts"]] == ["a"]
+    assert len(only_a["query_points"]) == 3
+    assert only_a["shared_points"] == [], "nothing to share with one cohort"
+
+    only_b = callbacks._retrieval_overlay(payload, ("b",))
+    assert [c["role"] for c in only_b["cohorts"]] == ["b"]
+    assert len(only_b["query_points"]) == 2
+
+
+def test_the_checklist_value_maps_to_the_cohorts_it_asks_for():
+    """Cohort A stays "on" rather than becoming "a" so a single-query retrieval
+    keeps the exact value this control has always held, and a session store
+    written before comparisons could be drawn still resolves."""
+    assert callbacks._roles_from_checklist(["on"]) == ("a",)
+    assert callbacks._roles_from_checklist(["on", "b"]) == ("a", "b")
+    assert callbacks._roles_from_checklist(["b"]) == ("b",)
+    assert callbacks._roles_from_checklist([]) == ()
+    assert callbacks._roles_from_checklist(None) == ()
+
+
+def test_a_single_cohort_payload_is_unchanged_by_the_comparison_machinery(
+        two_cohorts):
+    """A comparison must be the single-cohort case plus a second thing. If the
+    one-cohort overlay drifts, every existing behaviour drifts with it."""
+    a, _b = two_cohorts
+    payload = _comparison_payload(a, [])
+    payload.pop("comparison")
+    overlay = callbacks._retrieval_overlay(payload)
+    assert len(overlay["cohorts"]) == 1
+    assert overlay["query_label"] == "3 pooled cohort samples"
+    assert overlay["shared_points"] == []
+    assert overlay["query_point"] == overlay["query_points"][0]
+
+
+def test_a_single_sample_retrieval_is_still_named_by_its_sample_key(corpus):
+    """The map rail prints this, and it must not become "1 pooled cohort
+    samples" for a plain Sample-mode search."""
+    key = str(data.osdr_metadata()["sample_key"].iloc[0])
+    overlay = callbacks._retrieval_overlay(
+        {"sample_id": key, "hits": [{"gsm": "GSM1", "score": 0.9,
+                                     "archs4_index": 0}]})
+    assert overlay["query_label"] == key
+    assert len(overlay["cohorts"]) == 1
+
+
+# --- The key on the plot -----------------------------------------------------
+#
+# The map draws four encodings at once - corpus tissue hue, member fill hue,
+# hit ring shape, and corpus glyph shape - and until this key existed it
+# explained exactly one of them. These pin the structure, not the wording.
+
+
+def _classes(component) -> list[str]:
+    """Every className in a Dash component tree, in document order."""
+    out: list[str] = []
+    if isinstance(component, (list, tuple)):
+        for c in component:
+            out += _classes(c)
+        return out
+    cls = getattr(component, "className", None)
+    if cls:
+        out.append(str(cls))
+    children = getattr(component, "children", None)
+    if children is not None:
+        out += _classes(children)
+    return out
+
+
+def _key_shapes(children) -> list[str]:
+    """The glyph shape of each key row, in order."""
+    return [c.split("is-", 1)[1] for c in _classes(children)
+            if c.startswith("bm-key-glyph is-")]
+
+
+def test_a_plain_search_gets_a_two_row_key_and_no_headings(corpus):
+    """The single-query state must not pay for the comparison. With one query
+    on screen there is nothing for a name or a group heading to distinguish it
+    from, so the key is the query mark, the hit mark, and nothing else."""
+    key = str(data.osdr_metadata()["sample_key"].iloc[0])
+    overlay = callbacks._retrieval_overlay(
+        {"sample_id": key, "hits": [{"gsm": "GSM1", "score": 0.9,
+                                     "archs4_index": 0}]})
+    children = layout.retrieval_key_children(overlay, ("a", "b"), "2d")
+    assert _key_shapes(children) == ["star", "hit-a"]
+    assert "bm-key bm-key--retrieval" in _classes(children)
+    assert "bm-key-head" not in _classes(children)
+    assert "the query sample" in _text(children)
+    assert "pooled member" not in _text(children), (
+        "one sample is not a pool; the phrase is earned by k >= 2")
+
+
+def test_a_comparison_key_is_grouped_by_role_not_by_cohort(two_cohorts):
+    """The encoding has two factors and they do not share a channel: hue names
+    the cohort on a member, ring shape names it on a hit. Listing each cohort's
+    marks together buries that. Listing the two member rows adjacent and the two
+    hit rows adjacent shows it - one pair differs only in hue, the next only in
+    shape - so the layout is the explanation and no sentence has to assert it.
+    """
+    a, b = two_cohorts
+    overlay = callbacks._retrieval_overlay(_comparison_payload(a, b))
+    children = layout.retrieval_key_children(overlay, ("a", "b"), "2d")
+
+    assert _key_shapes(children) == ["star", "star", "hit-a", "hit-b",
+                                     "hit-both"]
+    # The rule that separates this key from the colour list below it hangs off
+    # this modifier. It was missing here once - the comparison branch returns
+    # from a different indent level than the single-query branch, so an edit
+    # that added the class to both matched only one - and the key sat flush
+    # against "Color · Tissue" with nothing between them.
+    assert "bm-key bm-key--retrieval" in _classes(children)
+    text = _text(children)
+    assert "Pooled members" in text and "Retrieved hits" in text
+    # Each cohort is named in both of its rows, so neither channel has to be
+    # carried across a heading by memory.
+    for label in ("Liver · Space Flight", "Liver · Ground Control"):
+        assert text.count(label) == 2, f"{label} is not named in both its rows"
+
+
+def test_the_doubled_mark_is_rowed_only_when_both_arms_are_drawn(two_cohorts):
+    """A hit retrieved by both is one point wearing both cohorts' rings, so it
+    cannot exist with an arm hidden. It is also not a third cohort, which is why
+    it is the last row of the hits group rather than a group of its own."""
+    a, b = two_cohorts
+    overlay = callbacks._retrieval_overlay(_comparison_payload(a, b))
+
+    both = layout.retrieval_key_children(overlay, ("a", "b"), "2d")
+    assert "retrieved by both" in _text(both)
+    assert _key_shapes(both)[-1] == "hit-both"
+
+    one = layout.retrieval_key_children(overlay, ("a",), "2d")
+    assert "retrieved by both" not in _text(one)
+    assert "hit-both" not in _key_shapes(one)
+
+
+def test_the_single_query_key_obeys_the_tick_too(corpus):
+    """The one tick hides the whole overlay, so the key has to recede with it.
+
+    This branch ignored `roles` at first, which meant unticking "Show it on the
+    map" left the plot with no star and no ring while the key went on counting
+    one member and five hits - the exact failure the count rule exists to
+    prevent, in the commonest state the map has.
+    """
+    key = str(data.osdr_metadata()["sample_key"].iloc[0])
+    overlay = callbacks._retrieval_overlay(
+        {"sample_id": key, "hits": [{"gsm": "GSM1", "score": 0.9,
+                                     "archs4_index": 0}]})
+    shown = layout.retrieval_key_children(overlay, ("a",), "2d")
+    assert "1" in _text(shown) and "hidden" not in _text(shown)
+
+    hidden = layout.retrieval_key_children(overlay, (), "2d")
+    assert _key_shapes(hidden) == _key_shapes(shown), "the marks stay named"
+    assert _classes(hidden).count("bm-key-row is-hidden") == 2
+    assert _text(hidden).count("hidden") == 2
+
+
+def test_a_hidden_arm_keeps_both_its_rows_receded(two_cohorts):
+    """Dropping them would leave a gold glyph on screen a moment later with
+    nothing to look it up in, and would make the key disagree with the ticks
+    that produced it. The hue and the shape it owns stay named; only the counts
+    go, because there is nothing on screen to count."""
+    a, b = two_cohorts
+    overlay = callbacks._retrieval_overlay(_comparison_payload(a, b))
+    children = layout.retrieval_key_children(overlay, ("a",), "2d")
+
+    assert _key_shapes(children) == ["star", "star", "hit-a", "hit-b"]
+    assert _classes(children).count("bm-key-row is-hidden") == 2
+    assert _text(children).count("hidden") == 2
+
+
+def test_the_key_follows_the_three_dimensional_symbol_substitution(two_cohorts):
+    """`Scatter3d` rejects `star` outright, so a member draws as a diamond
+    there. A key still showing a star would assert a mark 3-D does not draw,
+    which is worse than the silence it replaced. The hit shapes are deliberately
+    unchanged - that is why shape, not hue, carries cohort identity."""
+    a, b = two_cohorts
+    overlay = callbacks._retrieval_overlay(_comparison_payload(a, b))
+    assert _key_shapes(layout.retrieval_key_children(overlay, ("a", "b"), "3d")) \
+        == ["diamond", "diamond", "hit-a", "hit-b", "hit-both"]
+
+
+def test_an_uploaded_query_gets_no_member_row(corpus):
+    """An uploaded sample was never embedded into this map, so it has no
+    coordinate and draws no member mark. A row for it would key a glyph that is
+    not there."""
+    overlay = callbacks._retrieval_overlay(
+        {"sample_id": "UPLOAD|counts.csv::S1",
+         "hits": [{"gsm": "GSM1", "score": 0.9, "archs4_index": 0}]})
+    children = layout.retrieval_key_children(overlay, ("a", "b"), "2d")
+    assert _key_shapes(children) == ["hit-a"]
+
+
+def test_a_shared_hit_is_one_sample_wherever_it_is_counted(two_cohorts):
+    """`hit_points` is a concatenation across the arms, so a hit both cohorts
+    retrieved is in it twice. Quoting its length made the map say "10 hits, 2 of
+    them retrieved by both" for the same comparison whose banner on the other
+    view said "share 2 of 8 retrieved samples" - two surfaces, one search, two
+    numbers, and a subset relation that cannot hold either way. Both surfaces
+    count distinct samples now."""
+    a, b = two_cohorts
+    overlay = callbacks._retrieval_overlay(_comparison_payload(a, b))
+    per_arm = sum(len(c["hit_points"]) for c in overlay["cohorts"])
+    distinct = len(set(overlay["hit_points"]))
+    assert overlay["shared_points"], "this fixture is built to share two hits"
+    assert distinct == per_arm - len(overlay["shared_points"])
+    assert distinct < len(overlay["hit_points"]), "the concatenation double-counts"
+
+    _fig, _legend, badges = render.build_figure(
+        "pca", "2d", "species", ["archs4"], 5000, None, retrieval=overlay)
+    badge = next(b for b in badges if "cohorts" in b)
+    assert f"<b>{distinct}</b> samples" in badge, badge
+    assert f"<b>{len(overlay['shared_points'])}</b> retrieved by both" in badge
+
+
+def test_the_map_caveat_is_true_in_three_dimensions_too():
+    """The retrieval group is a static subtree and stays on screen in 3-D, so a
+    caveat reading "a projection of 512 dimensions into two" would be false to
+    a reader looking at three axes. That is the same class of error as a
+    parameter chip naming one t-SNE gradient method for both dimensionalities,
+    which `projection_params` takes `dims` specifically to avoid."""
+    caveat = _text(layout.control_rail())
+    assert "Hover a hit" in caveat
+    assert "into two" not in caveat
+    assert "cannot preserve" in caveat
+
+
+def test_the_corpus_key_rows_only_the_layers_that_are_drawn(corpus):
+    """A key is what you are looking at. That a diamond means OSDR had been
+    true since the map was built and was stated nowhere a viewer could read."""
+    both = layout.corpus_key_children(["archs4", "osdr"])
+    assert _key_shapes(both) == ["corpus-archs4", "corpus-osdr"]
+    assert "ARCHS4" in _text(both) and "OSDR" in _text(both)
+
+    assert _key_shapes(layout.corpus_key_children(["osdr"])) == ["corpus-osdr"]
+    assert layout.corpus_key_children([]) == []
+    assert layout.corpus_key_children(None) == []
+
+
+def test_the_key_glyph_shapes_all_have_a_stylesheet_rule():
+    """A shape with no rule renders as a 14px empty box, which is a key row
+    pointing at nothing. `test_every_classname_used_in_python_exists_in_some
+    _stylesheet` cannot catch these: the class is built by string interpolation
+    from the shape name, so it never appears in a className literal."""
+    css = _all_css()
+    shapes = ["star", "diamond", "hit-a", "hit-b", "hit-both",
+              "corpus-archs4", "corpus-osdr"]
+    missing = [s for s in shapes if f".bm-key-glyph.is-{s}" not in css]
+    assert not missing, f"key glyph shapes with no CSS rule: {missing}"
+
+
+#: Copy that was deliberately removed from the interface. Each of these was a
+#: sentence the rail or the panel used to carry, and each was cut for a reason
+#: recorded beside the code that used to emit it. They are pinned here because
+#: prose regresses silently: nothing else in the suite would notice a paragraph
+#: coming back, and several of these had already outlived the thing they
+#: described.
+REMOVED_COPY = (
+    "Not a difference vector",
+    "Nothing is dropped for you",
+    "Adds roughly two seconds per hit",
+    "One glyph per sample",
+    "Each glyph is a pooled member",
+    "no line is drawn",
+    "anatomical vocabulary",
+)
+
+
+def test_the_removed_copy_stays_removed():
+    """Neither view may say any of these again."""
+    source = "\n".join(
+        p.read_text()
+        for d in ("manifold", "bridge_rna")
+        for p in sorted((paths.REPO_ROOT / d).glob("*.py"))) + \
+        (paths.REPO_ROOT / "app.py").read_text()
+    back = [s for s in REMOVED_COPY if s in source]
+    assert not back, f"copy that was deliberately removed is back: {back}"
+
+
+def test_the_app_spells_color_the_american_way():
+    """One application, one spelling.
+
+    The map's own identifiers were already American - `colorby`, `color_by`,
+    `color_for_index`, `#color-by` - while its prose and two of its user-facing
+    strings were not, and `render._colour_plan` sat two lines from
+    `theme.color_for_index`. The retrieval view had one user-visible instance
+    left, in the comparison legend strip, which would have put two spellings on
+    screen for the same two-cohort search.
+    """
+    offenders = []
+    for path in (sorted((paths.REPO_ROOT / "manifold").glob("*.py"))
+                 + sorted((paths.REPO_ROOT / "bridge_rna").glob("*.py"))
+                 + sorted(paths.ASSETS_DIR.glob("*.css"))
+                 + [paths.REPO_ROOT / "app.py"]):
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            if "colour" in line.lower():
+                offenders.append(f"{path.name}:{i}")
+    assert not offenders, f"British spelling in the app: {offenders}"
+
+
+def _inline_backgrounds(component) -> set[str]:
+    """Every `style={"background": ...}` value in a Dash component tree."""
+    out: set[str] = set()
+    if isinstance(component, (list, tuple)):
+        for c in component:
+            out |= _inline_backgrounds(c)
+        return out
+    style = getattr(component, "style", None)
+    if isinstance(style, dict) and style.get("background"):
+        out.add(style["background"])
+    children = getattr(component, "children", None)
+    if children is not None:
+        out |= _inline_backgrounds(children)
+    return out
+
+
+def test_the_map_key_reads_its_hues_from_the_theme(two_cohorts):
+    """There is no second copy of a cohort hue left to drift.
+
+    The rail's old two-cohort key mirrored RETRIEVAL_QUERY and
+    RETRIEVAL_QUERY_B into map.css by hand, because Plotly cannot read a CSS
+    variable - so the swatch and the glyph were two spellings of one hex, and a
+    drifted swatch would have labelled the wrong cohort. The key on the plot
+    sets them inline from `theme` instead. The stylesheet keeps the shapes,
+    which have no Python constant to disagree with.
+    """
+    a, b = two_cohorts
+    overlay = callbacks._retrieval_overlay(_comparison_payload(a, b))
+    fills = _inline_backgrounds(
+        layout.retrieval_key_children(overlay, ("a", "b"), "2d"))
+    assert theme.RETRIEVAL_QUERY in fills
+    assert theme.RETRIEVAL_QUERY_B in fills
+
+    map_css = (paths.ASSETS_DIR / "map.css").read_text()
+    for value in (theme.RETRIEVAL_QUERY, theme.RETRIEVAL_QUERY_B):
+        assert value not in map_css, (
+            f"{value} is mirrored into map.css again; the key reads theme")
+
+
+def test_the_second_cohorts_hit_symbol_is_valid_in_three_dimensions():
+    """Scatter3d rejects an unknown symbol outright rather than degrading - the
+    failure that took the whole figure callback down with a 500 the first time
+    3-D was opened with a retrieval showing."""
+    import plotly.graph_objects as go
+
+    # Constructing the trace is the check: Scatter3d validates the symbol at
+    # construction and raises ValueError on one it does not know.
+    for symbol in (theme.RETRIEVAL_HIT_SYMBOL, theme.RETRIEVAL_HIT_SYMBOL_B):
+        go.Scatter3d(x=[0], y=[0], z=[0], mode="markers",
+                     marker=dict(symbol=symbol))
+
+    with pytest.raises(ValueError):
+        go.Scatter3d(x=[0], y=[0], z=[0], mode="markers",
+                     marker=dict(symbol="star"))  # the reason 3-D uses diamond
+
+
+# --- The router must not repaint a view that is already on screen ------------
+
+
+def test_the_router_declines_to_repaint_the_route_already_painted():
+    """`prevent_initial_call` is not enough on its own, and the gap it left was a
+    live bug. `dcc.Location` publishes `pathname` once it mounts, which Dash
+    reads as a change, so the router rebuilt the view the server had already
+    painted. Rebuilding the retrieval view is not free - it reads the OSDR
+    catalog and renders the sample preview - so its response landed a few
+    hundred milliseconds after load, on top of whatever the user had done in the
+    meantime. Clicking Cohort on arrival opened the cohort panel and then closed
+    it again, 6 times out of 6, and the click was innocent: its own callback ran
+    and returned the right answer, then the router overwrote the subtree it had
+    just updated."""
+    assert shell.navigation_for("/", "retrieve") is None
+    assert shell.navigation_for("/map", "map") is None
+
+
+def test_the_router_still_swaps_when_the_route_actually_changes():
+    assert shell.navigation_for("/map", "retrieve")["key"] == "map"
+    assert shell.navigation_for("/", "map")["key"] == "retrieve"
+
+
+def test_an_unknown_path_resolves_to_the_default_route():
+    assert shell.navigation_for("/nope", "map")["key"] == shell.DEFAULT_ROUTE["key"]
+    assert shell.navigation_for("/nope", shell.DEFAULT_ROUTE["key"]) is None, (
+        "and does not repaint the default view when that is already showing")
+
+
+def test_a_query_string_link_is_not_treated_as_a_navigation():
+    """`/?q=<sample_id>` is the deep link the served layout already handles at
+    build time. Repainting it would throw that away and restart the view."""
+    assert shell.navigation_for("/", "retrieve") is None
+
+
+def test_the_router_writes_back_the_route_it_painted(app):
+    """The store has to be an Output as well as a State, or the first real
+    navigation is the only one that ever happens."""
+    writers = [cb for cb in app.callback_map.values()
+               if any(o.component_id == "route-store"
+                      for o in (cb["output"] if isinstance(cb["output"], list)
+                                else [cb["output"]]))]
+    assert len(writers) == 1, "route-store must have exactly one writer"
+
+
+def test_an_uploaded_retrieval_is_not_labelled_as_a_pooled_cohort(corpus):
+    """An uploaded sample has no `sample_key`, so it has no coordinate on this
+    map. Reporting that as "0 pooled cohort samples" would be false twice over,
+    and it is what the rail said once the label moved out of its guard: the
+    branch tested how many members were *locatable*, not whether anything was
+    pooled."""
+    overlay = callbacks._retrieval_overlay({
+        "sample_id": "UPLOAD|my_counts.csv::SampleA",
+        "mode": "uploaded",
+        "hits": [{"gsm": "GSM1", "score": 0.9, "archs4_index": 0}],
+        "query": {"sample_name": "SampleA"},
+    })
+    assert overlay is not None, "an uploaded search still draws its hits"
+    assert overlay["query_points"] == []
+    assert overlay["query_label"] == "", (
+        "an empty label is what lets the rail fall back to 'an OSDR sample'")
+
+
+def test_the_second_query_star_opens_the_second_cohort(corpus):
+    """The comparison figure draws a `query2` node and every node it draws is
+    clickable. This branch was added because clicking it reported "No metadata
+    found"; it then raised TypeError instead, which is worse - the callback
+    errors and the inspector silently keeps showing the previous node."""
+    import pandas as pd
+    from bridge_rna import panels
+
+    a = pd.Series({"sample_id": "COHORT|a", "cohort_label": "Liver · Flight",
+                   "is_cohort": "1", "study_id": "OSD-137", "grouped_by": "Study",
+                   "stability": "0.72 at k = 6", "members": "OSD-137|x\nOSD-137|y",
+                   "excluded": "", "outliers": ""})
+    b = pd.Series({**a.to_dict(), "sample_id": "COHORT|b",
+                   "cohort_label": "Liver · Ground"})
+    hits = pd.DataFrame([{"gsm": "GSM1", "score": 0.9, "gse": "GSE1"}])
+
+    panel = panels.build_details_panel(
+        query=a, selected_payload={"kind": "query2", "node_id": "COHORT|b"},
+        hits_df=hits, query_b=b)
+    # ensure_ascii would escape the middot in a cohort label, so the
+    # assertions below could never match and would pass vacuously.
+    text = json.dumps(panel, default=str, ensure_ascii=False)
+    assert "Liver · Ground" in text, "the second star must open the second cohort"
+    assert "Liver · Flight" not in text, "and not the first"
+
+
+def test_a_comparison_without_a_second_query_says_so_rather_than_raising(corpus):
+    import pandas as pd
+    from bridge_rna import panels
+
+    a = pd.Series({"sample_id": "S1", "sample_name": "S1"})
+    panel = panels.build_details_panel(
+        query=a, selected_payload={"kind": "query2", "node_id": "nope"},
+        hits_df=pd.DataFrame([{"gsm": "GSM1", "score": 0.9}]), query_b=None)
+    assert "no second cohort" in json.dumps(panel, default=str,
+                                            ensure_ascii=False)
