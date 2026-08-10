@@ -147,7 +147,7 @@ The model and index (~2 GB) are stored in Git LFS; everything else arrives with 
 **1. Clone and fetch the large files**
 
 ```bash
-git lfs install
+sudo
 git clone https://github.com/de-jish/bridge-rna.git
 cd bridge-rna
 git lfs pull

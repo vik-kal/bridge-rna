@@ -847,6 +847,8 @@ def run_cohort_retrieval(sample_ids: list[str] | tuple[str, ...], topk: int
         member_tops=idx[1 + len(loo):1 + len(loo) + k],
         depth=int(topk),
     )
+    #print('Hello')
+    #print(hits)
     return hits, rows, stability
 
 
