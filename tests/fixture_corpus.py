@@ -1,4 +1,4 @@
-"""Build a tiny, fully synthetic Bridge Manifold corpus on disk.
+"""Build a tiny, fully synthetic Bridge RNA corpus on disk.
 
 The real corpus is a 963 MB memmap plus a multi-hour embedding job, so nothing
 in the test suite may depend on it. This module manufactures a miniature but
@@ -35,8 +35,17 @@ import pandas as pd
 
 EMB_DIM = 512
 
-# Category vocabularies, chosen so the fixture exercises both the low-cardinality
-# color-bys (sex, spaceflight) and the Top-N-plus-Other legend path (tissue).
+# Category vocabularies. The OSDR list is hyper-specific on purpose, the way
+# OSDR's own curation is, so `manifold/tissue.py` has real folding to do rather
+# than an identity map.
+#
+# Several of these columns - strain, sex, genotype, habitat, duration, diet -
+# have no reader left in the app: they backed OSDR-only color-bys that were
+# removed on 2026-08-11, and the cohort facets that used them went a week
+# earlier. They stay because this fixture's job is to be shaped like
+# `cache/osdr_metadata.parquet`, which still carries every one of them, and a
+# fixture narrower than the artifact it stands in for hides schema drift instead
+# of catching it.
 TISSUES = ["Liver", "Left kidney", "dorsal skin", "Soleus", "Quadriceps",
            "Eye", "Spleen", "Thymus", "Gastrocnemius", "Heart",
            "Adrenal gland", "Tibia", "Brain"]
@@ -50,10 +59,26 @@ SPACEFLIGHT = ["Space Flight", "Ground Control", "Basal Control"]
 # ARCHS4's register is GEO free text, not a controlled vocabulary - which is the
 # whole reason manifold/tissue.py exists. These are written raw and mapped
 # through the real canonicalizer, so the fixture tests the mapping rather than
-# assuming it. Chosen to overlap the OSDR vocabulary above, since a shared
+# assuming it. The first six overlap the OSDR vocabulary above, since a shared
 # bucket for both corpora is what the "Tissue" color-by is for.
-ARCHS4_SOURCES = ["liver", "whole blood", "Brain cortex", "HeLa",
-                  "left kidney", "skeletal muscle biopsy"]
+#
+# Eighteen of them, each canonicalizing to a *different* bucket, and that count
+# is load-bearing: the palette holds eleven, so Tissue is what overflows into
+# the neutral "Other" row here, the way it does on the real corpus with its 39
+# buckets against the same eleven slots. It used to be Study that exercised that
+# path, and Study was one of the nine OSDR-only color-bys removed on 2026-08-11
+# - which left the fixture with seven tissue buckets and nothing anywhere in it
+# that could overflow a legend. Assigned three per cluster below, so a cluster
+# still predicts its tissues and the two are still correlated.
+ARCHS4_SOURCES = ["liver", "whole blood", "Brain cortex",
+                  "HeLa", "left kidney", "skeletal muscle biopsy",
+                  "lung tissue", "heart left ventricle", "skin punch biopsy",
+                  "bone marrow aspirate", "small intestine", "spleen",
+                  "adipose tissue", "pancreatic islet", "thymus",
+                  "testis", "retina", "aorta"]
+#: How many of ARCHS4_SOURCES each synthetic cluster draws from. 6 clusters x 3
+#: covers the list exactly once, so no two clusters share a tissue.
+SOURCES_PER_CLUSTER = 3
 
 
 def _cluster_vectors(
@@ -258,14 +283,25 @@ def _write_archs4_metadata(cache_dir: Path, cluster_id: np.ndarray) -> None:
     from manifold import tissue as tissue_map
 
     n = len(cluster_id)
-    raw = [ARCHS4_SOURCES[int(c) % len(ARCHS4_SOURCES)] for c in cluster_id]
+    raw = [ARCHS4_SOURCES[(int(c) * SOURCES_PER_CLUSTER + (i % SOURCES_PER_CLUSTER))
+                          % len(ARCHS4_SOURCES)]
+           for i, c in enumerate(cluster_id)]
     # A slice with no usable label at all, so the Unknown path is always covered.
     for i in range(0, n, 37):
         raw[i] = ""
+    # And a slice with no *series* either. 839 rows of the real join carry an
+    # empty series_id - the samples present in the release-matched v2.5
+    # metadata and absent from the v2.latest the API serves. They are the rows
+    # that crash an index build which assumes "GSE" plus digits, so the fixture
+    # has to contain them or manifold/find.py is only ever tested against the
+    # easy half of its own input.
+    series = [f"GSE{5000 + int(c)}" for c in cluster_id]
+    for i in range(0, n, 53):
+        series[i] = ""
     pd.DataFrame({
         "global_index": np.arange(n, dtype=np.int32),
         "geo_accession": [f"GSM{9000000 + i}" for i in range(n)],
-        "series_id": [f"GSE{5000 + int(c)}" for c in cluster_id],
+        "series_id": series,
         "title": [f"sample {i}" for i in range(n)],
         "source_name": raw,
         "characteristics": [f"tissue: {r}" if r else "" for r in raw],
@@ -279,7 +315,7 @@ def build_all(root: Path, n_archs4: int = 4000, n_osdr: int = 300,
     """Build both halves of the fixture under ``root`` and return a descriptor.
 
     ``root/bridge_rna`` stands in for the Bridge RNA repository and
-    ``root/cache`` for Bridge Manifold's cache. Point the two environment
+    ``root/cache`` for the map's cache. Point the two environment
     variables ``BRIDGE_RNA_ROOT`` and ``MANIFOLD_CACHE_DIR`` at them before
     importing ``manifold.paths``.
     """

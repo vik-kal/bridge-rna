@@ -13,7 +13,7 @@ Bridge RNA is one app with two pages.
 Pick a sample from NASA's Open Science Data Repository (OSDR).
 Bridge RNA returns its nearest Earth neighbours, drawn as a network of matches and the studies they came from, with an inspector and an optional AI summary.
 
-![The Bridge RNA retrieval view: a mouse eye sample flown on Rodent Research-1, matched against its nearest neighbours, with the top hit open in the inspector](docs/bridge-rna-interface.png)
+![The Bridge RNA retrieval view: a mouse eye sample flown on Rodent Research-1, its five nearest Earth neighbours and the three GEO studies they came from drawn as a network, and the top hit's full GEO record open in the inspector](docs/bridge-rna-interface.png)
 
 The screenshot above is a real retrieval.
 The query is a mouse left-eye sample, and the studies it pulls back are all mouse retina studies.
@@ -25,7 +25,7 @@ The same space, seen all at once.
 Both collections - 2,108 NASA samples and 940,455 Earth samples - are placed in one shared projection and drawn as live points, colored by tissue.
 You can rotate it, switch between 2-D and 3-D, recolor it, and overlay a retrieval to see where a query and its matches sit.
 
-![The Bridge RNA map: the joint corpus as a 3-D projection, colored by tissue](docs/bridge-rna-map.png)
+![The Bridge RNA map: all 942,563 samples from both collections in one 3-D UMAP projection, colored by tissue, with the 2,108 NASA samples drawn as diamonds over the Earth cloud](docs/bridge-rna-map.png)
 
 ## How it works
 
@@ -79,7 +79,7 @@ The overlap the panel reports is a number about two *sets* of hits, and two arms
 Each cohort's pooled animals are drawn in its own color, its hits in its own ring shape, and a sample both cohorts retrieved carries both rings.
 You can untick either arm when the picture gets crowded.
 
-Full method and every measurement: [`docs/cohort_retrieval.md`](docs/cohort_retrieval.md), and [`docs/live_stability.md`](docs/live_stability.md) for how the trust number is measured.
+Full method and every measurement: [cohort retrieval](docs/design-notes.md#cohort-retrieval), and [live stability](docs/design-notes.md#live-stability) for how the trust number is measured.
 
 ### The map
 
@@ -101,6 +101,22 @@ And it separates the two corpora more than UMAP does, which makes it the worst o
 Vectors are L2-normalised before any reduction.
 Without that step the first principal component is really a magnitude axis and holds 57.8% of the variance, swamping the rest; normalised, it drops to 41.3% and the biology comes through.
 
+### Finding one study among 942,563 points
+
+Type a study identifier into **Find a study** on the rail and the matching points are marked with a white X.
+A GEO series (`GSE…`) marks all of its samples and an OSDR study (`OSD-###`) marks all of that study's.
+Suggestions appear as you type - `OSD-13` offers the studies it could become, with how many samples each holds.
+The list is bounded and scrolls; arrow keys walk it, Enter takes the highlighted row, Escape closes it.
+A button then offers to frame what it found; it is a button rather than something the search does for you, because a set can span the map, and because being zoomed into a region invites reading the points around a study as its neighbours when a 2-D projection does not preserve who those are.
+Once the view is framed - by a search, by a retrieval, or by your own scroll - a **Reset view** button appears on the rail beside them and takes you back to the whole map without losing what you searched for.
+
+Individual samples are still reachable by clicking an OSDR diamond on the map, which opens that sample's record.
+The box asks about studies: one glyph in a million is a dot, where a study's samples are a neighbourhood with a shape you can read.
+
+The box searches identifiers and not free text, and so do the suggestions.
+Typing "liver" offers nothing, tells you so, and points at the Tissue color-by, which is the control that actually answers it across both collections.
+A very large series is marked up to a stated limit rather than silently truncated, and whatever is selected - found or clicked - is described in one panel, with a link to its GEO record or to a retrieval, whichever applies.
+
 ### Coloring both collections by tissue
 
 OSDR and ARCHS4 describe tissue in completely different ways.
@@ -112,8 +128,12 @@ Because both collections go through the same function, a liver in GEO and a NASA
 All 48 OSDR values and 90.6% of the Earth samples land in a named bucket.
 
 The map will not paint a collection it cannot describe as though it were data.
-Pick an OSDR-only field like Flight vs Ground and the 940,455 Earth points have no value for it, so rather than a flat grey cloud that reads as "measured and empty", they are drawn as faint context with no legend entry.
+On a machine that has not fetched the GEO metadata, the 940,455 Earth points have no tissue, so rather than a flat grey cloud that reads as "measured and empty", they are drawn as faint context with no legend entry.
 The color-by menu says up front what each field covers, and a field whose data has not been built is shown disabled with the command that builds it.
+
+There are two colorings, Tissue and Species, and both cover every point.
+There used to be nine more, describing the NASA samples only - flight status, strain, sex, mission duration and so on.
+They were removed: each colored 2,108 points out of 942,563, scattered through a corpus whose shape is set by the 940,455 they sit among, so none of them separated anything you could see.
 
 ### Hovering and inspecting
 
@@ -232,22 +252,44 @@ The numbers are meaningless biologically; the corpus exists to exercise the inte
 
 ## Tests
 
+The test tooling is a separate install, because running Bridge RNA does not need it:
+
 ```bash
-.venv/bin/python -m pytest tests/ -q             # 330 tests, about twenty-five seconds
-.venv/bin/python tests/e2e_check.py              # 50 browser checks; needs the built cache
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m playwright install chromium   # only for the browser suites
+```
+
+```bash
+.venv/bin/python -m pytest tests/ -q             # 399 tests, about twenty-seven seconds
+.venv/bin/python tests/e2e_check.py              # 129 browser checks; needs the built cache
 .venv/bin/python tests/e2e_upload_check.py       # 70 checks of the upload path
-.venv/bin/python tests/e2e_cohort_check.py       # 146 checks of cohort retrieval
+.venv/bin/python tests/e2e_cohort_check.py       # 164 checks of cohort retrieval
 ```
 
 The pytest suite builds its own synthetic corpus in a temp directory and never touches the model checkpoint or the 963 MB memmap, so it runs on a machine that has neither.
 The three browser suites boot the real app against the real `cache/` and assert on what the page reports about itself, down to each budget tier drawing exactly the point count it advertises.
+Each of them counts and prints the checks it actually ran, so the numbers above cannot quietly drift from the suites.
 
-Two scripts check the science rather than the software, against the real corpus:
+The two screenshots at the top of this file are produced by the same harness, driving the same real app:
+
+```bash
+.venv/bin/python tests/screenshot_readme.py      # rewrites both images in docs/
+```
+
+It sizes the window to the content rather than assuming a viewport, and it exits non-zero if a panel ends up clipped or a figure runs off its canvas.
+Both views scroll internally, so a window that is too short does not produce a scrollbar, it silently crops the frame - which is how the previous retrieval screenshot lost 410 px of the inspector.
+The reasoning and the measurements are in [`docs/design-notes.md`](docs/design-notes.md#readme-screenshots).
+
+Three scripts check the science rather than the software, against the real corpus:
 
 ```bash
 .venv/bin/python precompute/validate_artifacts.py --mixing --quality
 .venv/bin/python precompute/validate_cohorts.py   # 6 checks over all 212 cohorts
+.venv/bin/python tests/check_join.py              # the two halves address the same samples
 ```
+
+`check_join.py` is the cheapest and the one worth running after any change to either half.
+The whole merged application rests on two unenforced pieces of arithmetic - an Earth hit's row in the embedding index *is* its point on the map, and a NASA sample is the same key on both sides - and if either drifts the map keeps drawing rings, just around the wrong samples.
 
 `validate_cohorts.py` is the honesty gate behind Cohort mode.
 It measures how much a pooled result survives dropping one animal, and holds that against two nulls: a pooled query over random samples, and a pooled query over random samples from the same study.
@@ -265,8 +307,12 @@ The second one is the demanding test, and its result is reported in the docs rat
 | `checkpoints_performer/` | Trained model checkpoint (Git LFS). |
 | `archs4_sample_embeddings_full/` | Precomputed Earth embedding index (Git LFS). |
 | `cache/` | The map's precomputed artifacts (built locally). |
+| `docs/` | One design record per feature: what was built, what was measured, what was rejected. |
 
-For the design and the verified facts in depth, see [`IMPLEMENTATION.md`](IMPLEMENTATION.md) and [`REFERENCE.md`](REFERENCE.md).
+Beyond this file there are three kinds of document, and it is worth knowing which one answers your question.
+[`IMPLEMENTATION.md`](IMPLEMENTATION.md) is the map's design record and the longest one: the offline/online split, the three projections, the color-by system, and every candidate that was measured and cut.
+[`REFERENCE.md`](REFERENCE.md) is the numbers - model config read out of the checkpoint, embedding statistics, measured timings, interface signatures with line numbers - and it is the one to trust when two documents disagree.
+`docs/design-notes.md` is every design decision that needed more than a code comment, in one file: [cohort retrieval](docs/design-notes.md#cohort-retrieval) and the [pooling measurement](docs/design-notes.md#cohort-pooling) behind it, [live stability](docs/design-notes.md#live-stability), the [even split](docs/design-notes.md#stability-panel-even-split) of a comparison's two arms, the [map's key](docs/design-notes.md#map-key), [finding a study](docs/design-notes.md#finding-a-study-on-the-map), [file ingestion](docs/design-notes.md#file-ingestion), and the [README screenshots](docs/design-notes.md#readme-screenshots).
 
 ## Licensing
 

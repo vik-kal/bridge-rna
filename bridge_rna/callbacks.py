@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
-import numpy as np
 import pandas as pd
 from dash import ALL, Input, Output, State, ctx, html, no_update
 
@@ -27,6 +26,7 @@ from .ai import (
     _format_hits_table_text,
     _format_osdr_query_text,
     _load_ai_prompt_template,
+    unavailable_reason,
 )
 from . import cohorts as C
 from .config import GENERIC_ENTREZ_EMAIL, MAX_UPLOAD_BYTES
@@ -114,7 +114,7 @@ def _cohort_query_series(cohort, geometry, excluded: list[str]) -> pd.Series:
         # No stability field. It used to carry `expected_stability(k)`, a curve
         # looked up by cohort size; it is measured during the search now and
         # travels in the payload's own `stability` block, which the inspector's
-        # stability panel reads. See docs/live_stability.md.
+        # stability panel reads. See docs/design-notes.md#live-stability.
         "members": "\n".join(geometry.members),
         "excluded": "\n".join(excluded),
         "outliers": "\n".join(outliers),
@@ -542,7 +542,6 @@ def register(app) -> None:
         *[Output(f"mode-tab-{m['key']}", "aria-selected") for m in QUERY_MODES],
         *[Output(f"mode-panel-{m['key']}", "style") for m in QUERY_MODES],
         *[Output(f"action-slot-{m['key']}", "style") for m in QUERY_MODES],
-        Output("mode-hint", "children"),
         Output("study-group", "style"),
         Output("network-graph", "figure", allow_duplicate=True),
         *[Input(f"mode-tab-{m['key']}", "n_clicks") for m in QUERY_MODES],
@@ -593,7 +592,6 @@ def register(app) -> None:
             keys = {m["key"] for m in QUERY_MODES}
             candidate = _safe_str(stored_mode)
             active = candidate if candidate in keys else QUERY_MODES[0]["key"]
-        hint = next(m["hint"] for m in QUERY_MODES if m["key"] == active)
         shown, hidden = {}, {"display": "none"}
 
         # The empty canvas has to invite the thing the active mode can actually
@@ -616,7 +614,6 @@ def register(app) -> None:
             *["true" if m["key"] == active else "false" for m in QUERY_MODES],
             *[shown if m["key"] == active else hidden for m in QUERY_MODES],
             *[shown if m["key"] == active else hidden for m in QUERY_MODES],
-            hint,
             # Upload has no study; Sample and Cohort share one.
             hidden if active == "upload" else shown,
             canvas,
@@ -1165,6 +1162,15 @@ def register(app) -> None:
         query_row = _query_series(hits_payload)
         if query_row is None:
             return "", "Selected query sample is missing from local metadata."
+
+        # Before the expensive part, not after it. Assembling the prompt fetches
+        # a study abstract per accession over the network, so a machine with no
+        # model installed - which is what a fresh clone is - used to spend up to
+        # a minute gathering text for a request that could never be sent, and
+        # only then say "install Ollama". That answer is knowable immediately.
+        blocked = unavailable_reason()
+        if blocked:
+            return blocked, ""
 
         hits_df = pd.DataFrame(hits_payload.get("hits", []))
         email = _safe_str(hits_payload.get("entrez_email")) or GENERIC_ENTREZ_EMAIL

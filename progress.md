@@ -6,6 +6,260 @@ Update after each meaningful change so another session can resume without losing
 This file used to track Bridge Manifold alone.
 The two repositories were merged on 2026-07-22 and it now covers the whole product; entries before that date describe the map half.
 
+## 2026-08-13 (the box asks about studies, and one control frames and unframes on the rail)
+
+Two simplifications asked for together, plus one real defect the second one exposed.
+
+**The find box takes studies only.** `GSE…` and `OSD-###` resolve; the two sample grammars - `GSM…`, and an OSDR sample by its full `<study>|<name>` key or its bare name - are gone. The question a reader brings to a 942,563-point map is "where did this experiment land", not "where is replicate 3": one glyph in a million is a dot, and its siblings are a neighbourhood with a shape. The two removed grammars also carried most of `find.py`'s weight for the least of its value - a second suggestion ranker with its own substring rule and its own ranking buckets, the GSM half of the accession index, and a 39-character identifier nobody types correctly twice. `find.py` is 565 lines to 437.
+
+Clicking an OSDR diamond still selects that one sample, now through `find.osdr_sample` rather than `find.find`. A mark on screen is an unambiguous reference to one point; the box is not, and the two entry points no longer pretend otherwise. `find.describe` is untouched and a series of one still renders that sample's full GEO record.
+
+The label is **Find a study**, the placeholder is `GSE143281 or OSD-100` (144 px in a 215 px field, measured in the browser), and the `shape` sentence names the two grammars it now takes.
+
+**One bug found by the narrowing.** `_gse_suggestions` appended a row before checking the limit, so `limit=0` returned one suggestion. It was unreachable while the GSM path handled the zero case with a slice; it stopped being unreachable the moment that path went.
+
+**Reset view moved from the plot to the rail.** It sat on the badge strip on the argument that a control's qualifier belongs with the thing it qualifies, and the viewport belongs to the plot. That argument is true and it still split one feature across two surfaces: the button that framed the map was on the rail and the button that unframed it was most of a screen away, so the pair could not be read as a pair. It is now a `View` group at the foot of the rail, shown only while the map is framed. There is still exactly one of it - framing a find, framing a retrieval and a plain scroll-zoom are the same state by the time they reach `viewport-store`.
+
+**And that move exposed a real defect in the combobox, which is the interesting part.** Enter with no active row falls through to Dash's `n_submit` and commits a search - and used to leave the completions for that same query hanging open underneath. The suggestion list is inline and the whole lower rail sits below it, so the next mousedown outside the find group closed it and retracted **57 px** between press and release. The two landed on different elements and the browser dispatched no `click` at all. Measured in the browser: mousedown at y=897.75, mouseup at y=840.25, zero click events on the button, while `element.click()` from the console worked perfectly. "Reset view" is the first control below the box that a reader reaches while the box still has focus, so moving it there is what made a long-standing layout-shift bug fatal instead of merely annoying.
+
+Two fixes, both structural. Enter now closes the list either way - a committed search has no pending completion to offer. And the outside-dismiss moved from `mousedown` to `click`, so the reflow happens after the event has been delivered and the control the reader aimed at still gets it.
+
+**Docs.** Three design-notes sections - "Finding a sample on the map", "Completing an identifier", "One reset for every framing" - became one, `#finding-a-study-on-the-map`, with the sample-grammar material cut rather than reworded and the surviving measurements kept. The contents table lost two rows; `CLAUDE.md`, `README.md` and `IMPLEMENTATION.md` follow. design-notes.md is 1789 lines to 1715.
+
+**Tests.** 399 pytest (from 401) and 363 browser checks, all green: `e2e_check.py` 129, `e2e_upload_check.py` 70, `e2e_cohort_check.py` 164. `test_find.py` lost the four-grammar tests and gained `test_the_box_takes_studies_and_not_samples`, `test_a_clicked_diamond_still_selects_its_own_sample` and `test_a_study_prefix_offers_only_studies`. The e2e find section now asserts a series marks its samples *and* that a GSM is refused as a shape.
+
+The upload suite failed once on "no console errors (2 seen)" and passed clean on a rerun; treated as a flake, not investigated further.
+
+---
+
+## 2026-08-13 (point-selection merged to main, pushed, and hosted locally)
+
+`point-selection` went to `main` as a fast-forward, nine commits, no conflicts and no merge commit, and `main` is pushed to `origin` at `14698a1`.
+The gate before the merge was the full unit suite: 401 passed in 29.08 s.
+
+The local host was already occupied.
+A stale `app.py` from the *system* Python 3.11, not the venv, held port 8050 and was serving pre-merge code, so it was stopped and replaced by `.venv/bin/python app.py`.
+Worth remembering as a failure mode: the port being busy looks like the app is up, and it is, but it is the wrong build, and nothing on screen says so.
+
+Hosting was then verified in a browser against the running server rather than by reading the diff, and the whole merged feature was exercised end to end.
+Fifteen checks pass: both routes paint their own view, the map draws its WebGL canvas and badges the real corpus (`ARCHS4 live: 940,455`, `OSDR: 2,108`), the find box completes `GSM4256` to ten well-formed rows, choosing one resolves to `GSM4256019 · 1 sample.`, `liver` still yields no completions, "Frame it" moves the viewport and "Reset view" returns it to `autorange`, header navigation returns to the retrieval view, and the console is clean.
+
+Two things about that verification are worth recording, because both cost a cycle and both will recur.
+
+**`curl` cannot check which view the router painted.**
+`serve_layout` keys off `flask.request.path`, and the path on the layout fetch is `/_dash-layout`, never `/` or `/map`, so both routes return the same 29,343-byte default layout to a command-line probe while the browser is served correctly.
+The HTML shell is identical for both routes by design too.
+A route check has to be a browser check.
+
+**Every failure in the first three smoke runs was an invented selector, not a defect.**
+`.bm-find-suggestion`, `.bm-find-status` and `#find-frame` do not exist; the real ones are `.bm-suggest-row`, `#find-status` and `#frame-find`.
+`page.fill` also does not drive this control, because the suggestions are built from real keystrokes, which is exactly why `tests/e2e_check.py` uses `page.type(..., delay=...)`.
+And Plotly writes its computed autorange back into `layout.xaxis.range`, so a populated range is not evidence of a moved viewport; `layout.xaxis.autorange` is the property that answers "did finding something move the map", and it is `True` before "Frame it" and `True` again after "Reset view".
+Read the selector out of the source before asserting on it, and prefer the property the existing suite asserts.
+
+## 2026-08-12 (two color-bys, a completing find box, and one reset for every framing)
+
+Five changes, worked as a dependency graph rather than five patches, because three of them meet in the same place: the find box's control group, the `viewport-store` that framing writes, and the rail copy around both.
+
+**The nine OSDR-only color-bys are gone.** Flight vs Ground, Spaceflight arm, Strain, Sex, Genotype, Study, Habitat, Mission duration, Diet. Each colored 2,108 of 942,563 points - 0.2% - scattered through a corpus whose structure is set by the 940,455 they sit among, so none of them separated anything. `data._flight_status`, the derived column it wrote, and the `_osdr_field` resolver factory went with them. `colorby.REGISTRY` is Tissue and Species, and with the GEO join present both color all 942,563 points.
+
+*The coverage machinery stays, and that is the interesting part.* It exists for partial fields and now looks over-built for a two-entry registry - except that **Tissue is an OSDR-only field on a machine that never fetched `cache/archs4_metadata.parquet`**, which is the state a fresh clone starts in. Every degraded path is still reachable there, and is now reachable *only* there: the "OSDR only" scope note, the amber partial bar, `GROUP_OSDR`, and the renderer's faint context cloud, which is invariant 5. So the four tests that asserted invariant 5 through `flight_status` assert it through degraded Tissue instead - a stronger test, since a real user reaches that state and nobody was reaching a spaceflight-arm coloring.
+
+*One fixture consequence, found by a failing test rather than by inspection.* The fixture's only field that could overflow the eleven-slot palette was Study. With it gone, fixture Tissue spanned seven buckets and nothing anywhere in the corpus could overflow a legend. `ARCHS4_SOURCES` now holds eighteen raw strings canonicalizing to eighteen distinct buckets, three per synthetic cluster, so Tissue overflows there the way it does on the real corpus (39 buckets, eleven slots) and cluster/tissue correlation is preserved.
+
+*Verified in the browser:* two options offered, none of the nine present, and both survivors drawing 942,563 glyphs with a correct non-stale legend across UMAP x t-SNE x PCA, cycling projection and coloring repeatedly. Nothing can restore a removed mode - there is no persistence, no color-by in the URL, and `colorby.get()` already falls back for an unknown key.
+
+**The find box completes an identifier as it is typed.** A bounded 196 px scrollable listbox with real combobox semantics: `role="combobox"` / `aria-autocomplete` / `aria-controls` / `aria-expanded` / `aria-activedescendant` over `role="option"` rows, driven by mouse, touch and keyboard (Up/Down with wrap, Enter, Escape, scroll-active-into-view, click-outside). Design: `docs/design-notes.md#finding-a-study-on-the-map`.
+
+*The rule that shaped it:* every suggestion is a prefix of one of the four grammars `find()` already resolves, so this could not become the free-text search the module deliberately refused. "liver" produces no list and still points at the Tissue color-by. `find.suggest()` opens no embedding and imports no Dash; 20 unit tests against the fixture corpus, including the contract that **every suggested value resolves through `find()`**.
+
+*Three defects, all found in the browser, none by the unit suite.* (1) `debounce=False` gives per-keystroke values but makes Enter mean only `n_submit`, so the commit had to be named outright or every letter would rebuild a 942,563-point figure. (2) A pattern-matching `ALL` input fires when its family is **re-rendered**, which for the suggestion rows is once per keystroke - read as "no identifier, use the box", it ran a real search per letter. (3) The one that mattered: **Dash discards the response to a request a newer request for the same callback supersedes**, so a keystroke's no-op overtook the Enter the server had already answered correctly, and *the first find of every session was silently lost*. Fixed structurally - the family's input moved to `choose_suggestion`, which publishes a `find-chosen` store, and `find-store` is written by a callback with no per-keystroke input at all. `test_nothing_that_changes_per_keystroke_can_reach_the_search` asserts the property, not the symptom.
+
+*Diagnosis note for the next session:* (3) was invisible from the outside - the server log showed the correct commit, the browser showed nothing. Instrumenting `resolve_find` to dump `ctx.triggered` was what identified it, after four wrong hypotheses (value-propagation race, page settle time, `fill` vs `type`, first-index-build latency). Two of those four were real but harmless and are recorded in the design notes so they are not re-litigated: `page.fill` + immediate `press("Enter")` commits stale text at a 0 ms gap and is correct from 5 ms up, which no keyboard can reach.
+
+*Row layout was measured, not chosen.* Side by side on a 268 px rail, `GSM5028824` beside `GSE165242 · Embryo / stem cell` ellipsed the accession to `GSM502…`; weighting the shrink towards the detail did not fix it (any shrink at all truncates a 78 px label) and `flex-shrink: 0` spent the detail down to `OSD-100 · l…`. Stacked, both are whole at 1680/1280/1100/860/600/393 px for ~11 px per row.
+
+**One control undoes every framing.** The first question was whether study framing and retrieval framing share state: they do, completely - both write `viewport-store`, which one callback owns, as does a plain scroll-zoom. So one **Reset view** chip, on the plot rather than the rail because it qualifies the viewport, shown only while framed, hidden in 3-D where the camera ignores axis ranges.
+
+*The part that would have failed silently:* `uirevision="keep"` preserves the reader's zoom unless the incoming figure *changes* the attribute, so omitting the range key is not the same instruction as autoranging. `callbacks.viewport_axes` says `autorange` outright. Measured: 60.17 → 1.13 → 60.17 (UMAP), 116,882 → 1.46 → 116,882 (t-SNE), 2.22 → 0.51 → 2.22 (PCA). Verified frame → reset → re-frame for study/series/single-GSM finds in all three projections, for a scroll zoom, and for all four retrieval paths (sample, cohort, comparison, upload), with the query, the marks, both cohorts' members and every hit surviving each reset.
+
+**Copy.** The three mode hints under Sample/Cohort/Upload are gone (each restated its own tab above a panel that answers the same question with real controls); the rail's standing "Hover a hit for its rank…" paragraph is gone (the fact is in every hit's hover, where the reader meets it); the trailing "…drawn where they sit in the space" clause is gone (it narrated the picture already on screen); and "ARCHS4 point budget" is now **"Number of ARCHS4 points"** - the rail's last piece of implementation vocabulary, on a control whose pills already read 100k / 250k / 500k / All. All five are pinned in `REMOVED_COPY`. The component id stays `budget`. The find placeholder was also tightened, because it had been clipping mid-word at "sample na…" since the control shipped.
+
+**Tests.** 401 pytest (from 387) and 363 browser checks (from 297): `e2e_check.py` 71 → 129, `e2e_cohort_check.py` 156 → 164, upload unchanged. The map suite's OSDR-only context section became a removal check plus a full projection x coloring sweep; the cohort suite's "no colored category on screen" state is now reached by unticking both layers, which is a stronger version of the same case since the retrieval overlay is drawn outside the layer toggles. `tests/screenshots.py` swapped its now-unreachable coverage frame for the autocomplete and the framed-plus-reset view.
+
+**Open threads.** None blocking. The `page.fill`-plus-instant-Enter race is one event-loop tick inside `dcc.Input` and is not reachable from a keyboard; closing it would mean either `debounce=True` (which forecloses suggestions) or poking React internals from the asset, and neither is worth it. If Dash ever flushes the pending value on Enter regardless of `debounce`, it disappears on its own.
+
+## 2026-08-11 (find a sample on the map, and eight design docs become one)
+
+**The map draws 942,563 glyphs and had no way to ask about a specific one.**
+`manifold/find.py` resolves an identifier to the points it names - a GEO sample, a GEO series, an OSDR study, or an OSDR sample by full key or bare name - and the matches are marked with a white X, with a button offering to frame them.
+It opens no embedding, builds no figure and imports nothing from Dash, so all 35 of its unit tests run against the fixture corpus.
+Design, every measurement and the rejected alternatives: `docs/design-notes.md#finding-a-study-on-the-map`.
+
+**The plan went through a design review before any of it was built, and the review changed four things.**
+Each of the four was then verified against the real corpus rather than taken on the reviewer's word.
+
+*The premise was false.* GSM and GSE resolve only through `cache/archs4_metadata.parquet`, which is **optional** - a fresh clone starts without it - so on such a machine 940,455 of 942,563 points are unfindable. The first draft had no coverage state and no fix hint. `find.searchable()` now reads `data.archs4_metadata_available` itself, and the message is `colorby.ARCHS4_META_HINT`, the same sentence the color-by uses, so the two controls that depend on that artifact cannot send a user after two different commands.
+
+*Framing was broken twice over.* `_frame_for`'s pad is `max(span * 0.6, 0.35)`, tuned for a retrieval's handful of neighbouring points. Measured on the real corpus, **OSD-457's 192 samples framed to 1.22x the corpus width and GSE228590's 8,764 to 1.03x**, so a "frame" zoomed the user *out*; typical sets are unaffected at 0.02x and 0.06x. `_clamped_to_corpus` fixes it for both callers (after: 1.00x and 0.87x). And auto-framing was reversing a decision `_frame_for`'s own docstring had already made - framing is offered as an action, never done automatically - which matters more here than there, because the map's 20 nearest points overlap the true cosine top-20 by a **median of 0**, so zooming someone into their sample's surroundings invites reading them as related. It is a button now, hidden in 3-D, and a structural test asserts `find-store` is not an Input of the viewport callback.
+
+*The index build would have crashed.* "A prefix plus digits" is false for **839 rows**, whose `series_id` is empty - the samples present in the release-matched v2.5 metadata and absent from the v2.latest the API serves. `int(s[3:])` raises on them. They are filtered before parsing, and `tests/fixture_corpus.py` now blanks every 53rd series so this path is no longer tested against only the easy half of its input.
+
+*Uncapped marks contradicted the repo's own precedent.* A series can be 8,764 samples. The cap is 500 and it states what it dropped in three places, following `RETRIEVAL_MAX_NUMERALS` and `COMPARISON_MAX_LABELS`.
+
+**Two of my own measurements were wrong and are corrected in place.** An index build quoted at "90 ms" was the integer parse alone, excluding the string materialization that is most of the cost; a later "5,963 ms" was taken with `tracemalloc` running, which inflates allocation-heavy code several-fold. The honest figure is **460 ms once, then about 0.8 ms a lookup**, and the parse is ~200 ms whether written as a regex, a slice or a Python loop.
+
+**The click probe was specified and cut, and the reason is now a test.** The ARCHS4 cloud emits no click event at all, because `hoverinfo="skip"` suppresses click picking as well as hover; enabling hover to recover it costs a measured **median 240 ms per mouse move** at full corpus. A DOM-listener route does work - `p2d` round-trips at 0.004 px and the server resolves the nearest drawn point in 0.5-0.9 ms - but a click at full-corpus zoom has **758 drawn points within 3 px**, so it cannot honestly mean "this sample". `test_archs4_cloud_carries_no_hover_or_customdata` now carries the 240 ms measurement, so a future "fix" fails there. The record half shipped anyway through the find box: looking a GSM up renders exactly the GEO record a click would have shown.
+
+**One panel, two ways in.** Clicking an OSDR diamond and finding a sample ask the same question, so `picked-group` serves both and a click is turned into a find. `picked-group`'s children are callback output now, because an OSDR sample offers an in-app `dcc.Link` and a GEO sample an external `<a>` - a `dcc.Link` pointing off-site hands its href to Dash's router, which tries to resolve `ncbi.nlm.nih.gov` as an application route. A click on empty cloud leaves the panel alone rather than wiping what was just searched for.
+
+**Docs: eight files became one.** `docs/design-notes.md` holds every design decision that needed more than a code comment, keyed by topic, with the twenty cross-document references turned into anchors. Nothing was dropped - every measurement and every rejected alternative survives - and 15 files were repointed. The eight originals are deleted; `docs/` is now one markdown file and the two README images.
+
+**Tests.** 387 pytest (up from 346) and 297 browser checks (up from 277: `e2e_check.py` goes 51 to 71, the other two suites unchanged and re-run). Both README screenshots recaptured, since the rail gained a control, and both still report no clipped panel and 0.000% ink in the outer 3 px. Verified at 1680, 900, 620 and 393 px with no overflow and no page errors. pyflakes is clean across the repo for the first time - six unused imports, a dead local and a placeholder-free f-string, all pre-existing but one.
+
+## 2026-08-11 (the README screenshots, recaptured and measured instead of framed)
+
+Both images in `README.md` were replaced, and the harness that produces them is now committed as `tests/screenshot_readme.py`. Design doc, measurements and rejected alternatives: [`docs/design-notes.md`](docs/design-notes.md#readme-screenshots).
+
+**The retrieval screenshot was cut off, and it had been since 2026-07-22.**
+The inspector ended mid-record, so the top hit's publication, journal and DOI were not in the frame, and the network's lowest node was sliced by the bottom edge.
+Measured on the real app at the viewport that capture used, 1680x1010: `#details-panel` was hiding **410 px** and `.sidebar` **26 px**.
+That 410 px is the same number in the comment at `assets/retrieve.css:21-28` and in the 2026-07-26 entry below. The CSS was fixed then and is still correct; the image simply predated the fix and was never retaken.
+
+**A fixed viewport cannot be right for either view, which is the transferable part.**
+Both are fixed-height instruments that scroll internally, so a window shorter than the content does not produce a scrollable page, it produces a silently clipped one, and nothing in the capture output says so.
+`fit_viewport` now grows the window until no scroll container reports overflow, re-measuring after each step because a taller window changes what the panels lay out. Retrieval settles at **1680x1444**, the map at **1680x1010**.
+The check has to ignore anything under 40 px: `.visually-hidden` and Dash's checkbox wrappers are 1x1 clipped boxes by design and would otherwise report overflow forever.
+
+**A figure running off its canvas is a second failure mode, and the DOM cannot see it.**
+A Plotly canvas is exactly as big as its container whether or not the drawing fits. The first map recapture proved it: a 3-D camera dollied in with two wheel events reported no overflow anywhere while the cloud and the bottom row of tick numerals ran off the edge.
+So the figure is measured as pixels - re-rendered through `Plotly.toImage`, which excludes the floating key and badges, with the paper colour read from the image's own corner so it works on navy and on white. Ink in the outer 3 px is the hard failure; the outer 14 px is the margin the framing aims for.
+
+**The 3-D camera is now searched, not gestured.** A wheel step is a fixed fraction of the current distance, so a loop of wheel events cannot ask for a specific framing or be repeated after a resize. `eye` is set outright, and the distance chosen is the one with the most ink on the canvas among those leaving the band clean: **2.20**, at 5.44% fill, against 5.94% at 2.05 which touches the edge.
+The *direction* is deliberately not searched. Three candidates at three canvas heights scored within 0.01% of each other, which is noise, and noise picking the camera angle means the frame changes shape between runs. It is fixed at `(0.68, 0.68, 0.28)` as a stated compositional choice.
+Canvas height was searched too and does not earn its cost: 1010 px to 1450 px moves fill 5.44% to 5.83%, because what limits the frame is the sprawl of the x and y tick numerals along the bottom.
+
+**Only what a user could do.** The camera is a user action; `scene.domain`, axis visibility and marker sizes are not, so none were touched. Cropping and CSS `zoom` were rejected for the same reason - a screenshot that reframes the app by editing the figure is no longer a screenshot of the app.
+
+Both frames now report 0.000% ink in the outer band and no clipped panel, and the script exits non-zero if that stops being true, so a layout change that breaks the images fails the capture instead of shipping a cut one.
+The new frames also show a year of UI the old ones predated: the t-SNE pill and the projection-parameter readout, the Sample/Cohort/Upload mode tabs, the map key's corpus-shape footer, and the OSDR diamonds in 3-D that `render.py` used to discard.
+
+One incidental find, left alone deliberately: clicking the option a Dash 4 dropdown already holds leaves the Radix popover open rather than closing it, so the next click lands on the overlay. `choose()` skips the interaction when the trigger already reads right and presses Escape if the popover survives. Worth knowing in the browser suites.
+
+## 2026-08-11 (production-readiness pass: the map becomes responsive, and the app becomes operable by keyboard)
+
+A whole-repository pass ahead of integration into a NASA-managed site.
+Baseline first: 335 pytest and 276 browser checks all passed before anything changed, so everything below is a defect found by looking rather than by a failing test.
+The suites end at **346 pytest** (11 new, all pinning something that was broken) and **277 browser checks** (one more than the 276 it started with).
+
+**The map had no responsive behaviour at all, and at phone width it was not usable.**
+`map.css` carried zero media queries, and the two fixed widths in it are what turned that from tight into broken: a 268 px rail plus a 228 px floating key is 496 px of furniture, so on a 393 px iPhone the plot was a 125 px strip and the key sat *on top of* the rail, covering the projection pills and half the Layers group.
+Measured on the running app, both views.
+Below 900 px the columns now stack and the document scrolls, which is the answer the retrieval view already had at 1180 px; the plot takes `68vh` with a 420 px floor, and below 620 px the key narrows to 184 px and caps its height.
+The stacked rail lays its groups out in CSS **columns**, not a grid: the groups are wildly unequal in height ("Your retrieval" is three paragraphs and a button, "Dimensions" is two pills) and a grid row is as tall as its tallest cell, which left about 250 px of empty rail under the short ones on an iPad. Columns balance; `break-inside: avoid` keeps a group whole.
+
+**Three defects fell out of doing that, and two of them were not about width.**
+
+*The key's rows compressed instead of the list scrolling.* A column flex item shrinks below its content height by default, so once `.bm-legend` hit its own max-height the rows crushed into each other and the counts lost their descenders - `overflow-y: auto` had nothing to act on because there was never any overflow. Fixed with `flex: none` on `.bm-legend-item` and `.bm-key-row`. Reproduced at 393 px; the same would happen on a desktop with enough categories drawn.
+
+*The map's graph never re-laid-out when its container changed size.* `dcc.Graph` for the map set no `responsive: True` - the retrieval view's always had - so Plotly kept the geometry it was first laid out with and drew a quadrant of the corpus into the whole canvas after any resize, breakpoint crossing or phone rotation.
+
+*`.panel-header` centred its dot against the whole title block*, so the dot drifted downward as the subtitle wrapped; on a phone the canvas subtitle wraps to three lines and the dot sat beside the second one. `flex-start` plus a 7 px offset puts it on the title's first line where it belongs.
+
+**Three of the map's six controls could not be reached by keyboard at all.**
+`.bm-seg .dash-options-list-option-wrapper { display: none }` hid the radio input that carries the state - and `display: none` takes an element out of the tab order and out of the accessibility tree as well as out of the picture, so Projection, Dimensions and the ARCHS4 point budget were mouse-only.
+The giveaway was already in the file: a `:focus-within` rule on the option label that could never fire.
+The input is now clipped rather than removed, and arrowing through Projection changes the projection - verified end to end.
+The legend's filter field was the one element in either view a keyboard walk could land on with nothing to show for it (`outline: none` with no replacement); it has a ring drawn for the dark canvas now.
+
+**Every control was announced by its own value and not by its name.**
+Dash 4 renders a Dropdown as a button whose `aria-labelledby` points at the span holding its value, and a Slider as a Radix thumb with no name at all, so "OSDR study: OSD-100" reached a screen reader as "OSD-100, button".
+Neither is fixable with `for`, because neither renders a labelable element.
+Both views wrap each control in `role="group"` with `aria-labelledby` on the heading that already names it - `bridge_rna.layout._labelled` and `manifold.layout._group`, twelve controls between them, no visual change.
+The map also gained the landmarks it never had: the rail is an `<aside>` with a hidden `<h2>`, the plot is a `<main>`. Before this the map was a `div` inside a `div` with one heading on the whole page.
+
+**Both text tiers below `--text-primary` failed WCAG AA, and one of them was already documented as failing.**
+`--text-muted` measured **2.90:1** on white and carried every rail label, kicker, hint, slider mark and dropdown placeholder - so the smallest type in the app was also the least legible - while `--accent` at **3.76:1** carried the primary button's white label and every blue link and tab.
+`map.css` had recorded that exact finding and fixed it for one class.
+`--text-muted` is now `#616e80`, chosen so its *worst* ground clears the bar (4.53:1 on the error tint, 5.18:1 on white), and a second blue `--accent-text: #1663dd` runs wherever the accent carries or grounds text, set by the tightest ground it lands on - the accent tint the mode tabs and facet chips sit in, 4.83:1.
+`--accent` itself is untouched, so every border, fill, focus ring and Plotly mark keeps the identity hue; `--accent-hover` moved a step darker to keep the ramp monotonic.
+Measured before and after on the running app: **20-25 failing text runs per screen, down to zero.**
+The brand tile is the one deliberate exception, under WCAG 1.4.3's logotype clause, and the stylesheet says so.
+`test_every_text_token_clears_wcag_aa_on_every_surface` pins all of it, and `test_theme_matches_the_bridge_rna_tokens` was widened from 6 tokens to 19 because `theme.py`'s mirror had already gone stale on `TEXT_MUTED`.
+
+**Two encodings said things the data does not support.**
+The retrieval network sized each hit node by `16 + (score - min(score)) * 20` - a second encoding of the quantity the edge width already carries, on a different scale, keyed nowhere, and the exact min-max rescale `_edge_width` exists to avoid. Over the 0.0016 spread these scores actually have it varied the diameter by three hundredths of a pixel, so it looked like a constant while claiming to be a measurement. Constant now: one quantity, one channel, and that channel is in the key.
+The hit inspector printed NCBI's `gpl` field raw, so "Platform 21103" - a number that matches no GEO record. `geo._accession` normalizes it the way the `gse` field beside it was already being normalized, and refuses to decorate anything that is not a bare accession.
+
+**The comparison network named none of its hits.** The single-query network labels every one; a comparison put the accessions in a tooltip only, so on paper or in a screenshot - which is where that figure ends up - it carried no identities at all. They are drawn up to 20 nodes and dropped above it, because the two arms share one vertical rhythm and 2*k labels collide at k=30. Same rule, and the same reason, as the map's `RETRIEVAL_MAX_NUMERALS`.
+
+**Cleanup, all of it traced first.**
+`build_bar_figure` was defined, never called, never imported, never tested and named in no document - and it drew similarity on a Plotly-autoranged axis, so it was a truncated-axis chart waiting to be revived. Deleted.
+`biopython` moved out of `requirements.txt`, where it was described as pinned to what the app was verified against: the app never imports it, it is reached only by `demo_osdr_top5.py --biopython-metadata`, and it was not installed in the venv every measurement in this repository was taken on.
+`requirements-dev.txt` is new because the README told you to run pytest and Playwright and nothing in the repository would install either.
+`MEETING_QA.md` is deleted; the upload cap and the "no metadata is collected" fact were the only things in it that lived nowhere else, and both are now in [`docs/design-notes.md`](docs/design-notes.md#file-ingestion).
+`tests/check_join.py` was the one file that *looked* dead and is not - it is the honesty gate on the arithmetic the whole merged app rests on - so it is now named in the README beside the other two science gates.
+`IMPLEMENTATION.md` and `REFERENCE.md` are retitled off "Bridge Manifold", a name the product has not used since the merge and which was still in their titles, in module docstrings, and in a user-visible `SystemExit` message.
+
+**Two defects the verification pass itself turned up, both in the gates rather than in the product.**
+
+*`tests/check_join.py` did its work, printed "EVERY POINT ADDRESSES THE CORRECT SAMPLE", and then never exited.* Sampled at the hang, the main thread sits in `__cxa_finalize_ranges` -> `arrow::internal::ThreadPool::~ThreadPool` -> `Shutdown` -> `condition_variable::wait`: PyArrow's static thread pool deadlocking against its own workers during interpreter teardown. It is intermittent - the same script had exited cleanly twice earlier the same day - which is worse than reliable, because a gate that usually returns and occasionally wedges is one nobody can put in a pipeline. It flushes and `os._exit`s now; three consecutive runs return in about a second. This was found only because the gate was promoted into the README and therefore actually run in sequence with everything else.
+
+*One of the 50 browser checks was measuring the network and reporting it as a layout defect.* "the inspector scrolls its own overflow instead" depended on the opened hit's GEO record being long enough to overspill the panel by itself - but that record is fetched live from NCBI inside the callback and the fetch fails closed, so a rate-limited run produced a short record, no overflow, and a red line about a layout invariant that was never at risk. The check now appends a 2,000 px filler to force the condition the invariant is about, asserts the panel scrolls *and* that the page still does not grow, then removes it. Deterministic, and it tests one more thing than it did before, so the suite is 51 rather than 50.
+
+*And a third that only became reachable because of the keyboard fix.* Dash spends its `--Dash-Fill-Interactive-Strong` token on *text* as well as on fills: it paints an option's label with it on `:hover` and `:focus-within`, at a specificity of (0,3,1) - `:not(:has(input[disabled]))` is worth more than it looks - so it outranks whatever either view writes for its own controls. That token pointed at `--accent`, so the moment a keyboard user put focus inside the Projection pill its label went back to 3.76:1. The `:focus-within` half had been unreachable for as long as the radio was `display: none`, which is why the fix and the defect arrived together. One line now points the token at `--accent-text` and every Dash control is covered at once. It took a pixel read of the screenshot to find: three audit runs reported it, the browser agreed with them, and a direct probe of a freshly loaded page did not - because the state depends on where focus happens to be.
+
+*And one the pass introduced and the screenshots caught.* Scoping the retrieval view's text-input rule to the inner `<input>` also, briefly, styled the map's legend filter: `dash-input` is Dash's class and it is on every `dcc.Input` container, so a rule written for the sidebar reached a field sitting on the navy canvas and turned it into a white box with dark text. No assertion saw it; the iPhone screenshot did. It is scoped to `.sidebar` now and `test_the_retrieval_input_rules_cannot_reach_the_map` keeps it there.
+
+**Not changed, deliberately.** An unknown path still renders the retrieval view with a 200; that is standard for a single-page app and no workflow is broken by it. The Google Fonts CDN stays, per the call made at the start of this pass - worth knowing that it is the *only* source of console errors in the whole audit, two 404s from `fonts.gstatic.com` for an Inter woff2, with the fallback stack rendering fine. The categorical palette was not touched: it is CVD-validated and its slot order is the mechanism.
+
+## 2026-08-06 (the two arms of a comparison get an even split, and the clipping under it is fixed)
+
+**The two cohort sections of the stability panel are now even columns with their rows aligned.**
+Asked whether they could be "split evenly UI wise", and the answer turned out to be that they were not merely uneven, they were unequal: cohort A rendered complete and cohort B's last row was clipped by the panel's own fold at **every** viewport measured on the real app - 7.8 px at 1680x1050, 9.9 px at 1600x1000, 14.2 px at 1440x900, 65.6 px at 1280x800.
+The row that went was "Moves it most", which names the animal whose absence moves the result furthest and is the only actionable line in the block.
+The two blocks were also unequal before any clipping, 148.3 px against 160.7 px, and the details panel below was being given 264 px for 506 px of content while the panel above held 447 px to say two numbers.
+
+Side by side the panel holds **354 px where it held 456**, nothing is clipped at any viewport, the two arms are equal by construction, and **0.89 sits on the same baseline as 0.94** instead of 160 px below it - which is the comparison the panel exists to support, and which previously cost the reader a memory hop.
+The details panel gained about 100 px at every size.
+
+**The alignment is `subgrid` with rows addressed by class, never by child order.**
+Either of the last two rows can be missing from either arm, so counting children would let cohort B's flag land in the row holding cohort A's member name.
+The tracks are `minmax(0, 1fr)` rather than `1fr`, which floors at min-content: sample keys run to 39 characters in mono across the corpus and any unbreakable run would push one column wider than its twin.
+
+**Making the panel shorter was not sufficient, and the residue named a real bug.**
+With the columns in place the panel still lost 3-11 px, enough to cut descenders off a sample key's last line.
+The cause was `.details-panel { flex: 1 20 auto }`: with a content basis that panel asks for the ~506 px it measures - a height it will never get and does not need, since it scrolls by design - so every layout pass began in overflow and gave it back off *both* panels in proportion. `flex-shrink: 20` made the details panel's share large; it never made the stability panel's share zero.
+It is now `flex: 1 1 0` and claims the leftovers instead, so there is no overflow to divide, and the degradation path falls out of the same rule rather than a tuned constant.
+
+**"differs by *facet*" moved to the panel header**, because it describes the pair rather than either arm and hanging it under B's letter started B's name a line below A's.
+**"Moves it most" is now always drawn**, saying "every member equally" when no member moves it further than another, because an absent row and a clipped row look identical on screen and a clipped row on that exact line is what this change fixed.
+The low-stability flag stays deliberately unequalized: a counterpart badge for a healthy arm is the grade `R̄` was deleted for being.
+
+**The guard that should have caught this had a 20 px hole in it.**
+The shipped check compared the last block's bottom against `bounding_box()`, which is the *border* box, so a block could run through the panel's own 20 px bottom padding and stop 1 px short of the border - at 1600x1000 the block ended 9.9 px below the content box and 10.1 px above the border box, satisfied by exactly the margin that hid the failure. It never compared `scrollHeight` to `clientHeight` either.
+It now measures the content box and the scroll box, and asserts the two arms share a top, a height, and a baseline for their numbers.
+
+**The flex fix regressed every width below 1180 px, and an adversarial review of the working tree is what found it.**
+`flex: 1 1 0` is right in the desktop column, whose height is fixed, and wrong the moment the app grid collapses to one column and the inspector's height comes from its contents instead - because a zero-basis item contributes nothing to that height.
+So the column sized itself to the other two panels and pinned the details panel to its 120 px floor, hiding **372 px at 900 px wide and 388 px at 390 px**, where with a content basis it had stood at its full 491 px and let the page scroll.
+Measured both ways against the running app before writing the fix, which is `flex: 1 1 auto` and `overflow: visible` inside the existing `@media (max-width: 1180px)` block, beside the two rules already there that lift the caps on the stability and AI panels for exactly the same reason.
+Every desktop measurement of the even split was clean while this was broken, which is the lesson: a flex basis is a claim about which axis is constrained, and changing one is only correct for the breakpoints where that claim holds.
+
+**Two smaller things came out of the same review.**
+At 320 px of page width the "moves it most" label and its score stop fitting on one line in a 121 px column, and cohort A's score sat against cohort B's label; `.stability-weakest-label` is `flex: 0 1 auto` with `min-width: 0` now, so it wraps identically in both columns and the even split survives 320 px without a breakpoint that would have stacked the arms on a phone.
+And the 12.4 px by which the two blocks used to differ was **not** the `differs by` phrase, which costs nothing: it is +13.0 px of separator box on the second block, -15.94 px from cohort A's sentence wrapping where B's did not, and +15.28 px from cohort B's key wrapping where A's did not.
+Two content terms that nearly cancelled by luck, over one structural offset - so the old layout was metastable rather than stably asymmetric, and the gap moved from one search to the next. [`docs/design-notes.md`](docs/design-notes.md#stability-panel-even-split) carries the decomposition; the first draft of that document got it wrong and is corrected.
+
+**Five dead CSS rules went with it**, all orphaned by earlier deletions rather than by this change: `.cohort-stat + .cohort-stat`, `.cohort-stat-head`, `.cohort-stat-label` and `.cohort-stat-value` dressed the two-stat card whose second stat was `R̄`, removed on 2026-08-05, and `.cohort-flag-body` was orphaned when the caution became one line.
+`test_app.py`'s stylesheet check could not see any of them: it filters to `bm-` and `app-` prefixes.
+
+**Tests.** 335 pytest (up 5) and 156 cohort browser checks (up 10). All 50 main and 70 upload checks re-run unchanged, because `.details-panel` is shared.
+`test_every_row_the_pair_grid_places_has_a_rule_that_places_it` is the one worth keeping in mind: it reads the stylesheet and fails if a direct child of an arm has no `grid-row`, because such a row lands in an implicit track the other column does not have and shears the two apart. Verified by injecting a fifth row and watching it fail, then removing it.
+The browser suite now re-measures the panel at 900, 390 and 320 px, which is the regression above turned into a check.
+Ten payload shapes were also rendered through the shipping `build_stability_panel` and measured in Chromium at 1700 px and 390 px - both arms named, one arm without a weakest member, neither, one flagged, both flagged, the corpus's longest key in both columns, long labels at top-k 50, a zero baseline, and a lone cohort with and without a named member - every one with equal widths, equal heights, aligned names, aligned numbers, no horizontal overflow.
+The layout was chosen by a design workflow that specified three candidates in full and judged them on information design, doctrine fidelity and implementation risk; all three judges ranked this one first. Its measurements and the rejected alternatives: [`docs/design-notes.md`](docs/design-notes.md#stability-panel-even-split).
+
 ## 2026-08-06 (result stability is measured on the query that ran, not looked up)
 
 **The rail's confidence number is gone, and the honest version replaced it on the right.**
@@ -47,7 +301,7 @@ The review also caught that `REFERENCE.md`'s per-file test table had been stale 
 Two passes were run and produced byte-identical measurements, which is what a state-carried-between-runs bug would have broken.
 The load-bearing unit test is the one that scores every leave-one-out pool the slow and obvious way, one scan each, and requires the fused path to agree.
 One finding worth keeping: a batch of queries and a single query agree to about 1.3e-07 rather than bit for bit, because one is a BLAS matrix-matrix product and the other a matrix-vector product. That is a couple of float32 ulps, and it is the same effect check 1 of the validator documents.
-Design, measurements and rejected alternatives: `docs/live_stability.md`.
+Design, measurements and rejected alternatives: [`docs/design-notes.md`](docs/design-notes.md#live-stability).
 
 **Hosted on 8050 and checked against the running instance rather than against a suite.**
 The port was already occupied by a server from 01:10 that morning, serving pre-change code and looking perfectly healthy - the second time that has happened, and the reason last session's entry says a green e2e proves the code works rather than that the hosted process runs it.
@@ -102,7 +356,7 @@ Neither was changed, which is the right outcome for a check that finds nothing.
 ## 2026-08-06 (the map keys every mark it draws; both pooled queries get described)
 
 A copy pass over both views, plus one design change and two defects the audit behind it turned up.
-Full design document: `docs/map_key.md`.
+Full design document: [`docs/design-notes.md`](docs/design-notes.md#map-key).
 
 **Seven sentences deleted from the interface.**
 "Not a difference vector." / "Nothing is dropped for you." / the three-line metadata-enrichment cost note / "Colours all 942,563 points." / the Tissue color-by's anatomical-vocabulary paragraph / "One glyph per sample; zoom re-samples the visible window." / "Each glyph is a pooled member; the query itself is a mean of them and has no position here."
@@ -148,7 +402,7 @@ Re-adding one is a single line in `FACETS`; nothing else hard-codes a facet, whi
 
 **`R̄` is gone from the cohort card and the inspector.**
 Across all 212 real cohorts its median is 0.9991 and it is no lower at k=2 than at k=30, so it never separated a group worth trusting from one that was not, while a number pinned within a thousandth of its maximum sitting beside one that genuinely varies is read as a grade.
-`resultant_length` is deleted rather than left unused; the measurement stays in `docs/cohort_pooling.md`.
+`resultant_length` is deleted rather than left unused; the measurement stays in [`docs/design-notes.md`](docs/design-notes.md#cohort-pooling).
 The **per-member** leave-one-out cosine and the outlier flag stay: that statistic varies within a cohort, names an individual animal, and is what the exclude checkbox acts on.
 
 **A comparison now draws both cohorts on the map.**
@@ -160,7 +414,7 @@ Gold `#ffc233` against teal `#0bab9f` is dE2000 43.4 normal and 31.7 at worst un
 Both hit symbols are in `Scatter3d`'s vocabulary, so 2-D and 3-D encode a hit identically.
 **A shared hit is emergent, never computed**: it is in both hit lists, so it gets both traces and draws as a ring inside a square, and the map's shared count therefore cannot drift from the banner's.
 The "Show it on the map" tick became one tick per cohort with a colour key under it, and framing follows the ticks.
-Rejected with reasons in `docs/cohort_retrieval.md` section 9: a convex-hull footprint (claims territory the cohort does not occupy, and invites area comparison across projections that preserve neither), connecting polylines (already rejected for the single-cohort overlay, and the reason survives doubling), a dedicated shared hue.
+Rejected with reasons in [`docs/design-notes.md`](docs/design-notes.md#cohort-retrieval) section 9: a convex-hull footprint (claims territory the cohort does not occupy, and invites area comparison across projections that preserve neither), connecting polylines (already rejected for the single-cohort overlay, and the reason survives doubling), a dedicated shared hue.
 
 **Three pre-existing defects fixed on the way.**
 The halo scaled with membership - every member carried a 46 px ring at 0.50 alpha, so a 38-animal cohort composited into a teal disc; alpha is now `0.50/sqrt(k)` floored at 0.14.
@@ -189,9 +443,9 @@ Each has a test that fails without its fix. The lesson worth keeping is the shap
 
 ## 2026-08-05 (cohort retrieval built, validated on the real corpus, and shipped)
 
-`docs/cohort_pooling.md` had specified and measured this feature on 2026-07-30 and left it unbuilt.
+[`docs/design-notes.md`](docs/design-notes.md#cohort-pooling) had specified and measured this feature on 2026-07-30 and left it unbuilt.
 It is built now: a fifth query-vector source that pools an experimental group into one query, a Sample / Cohort / Upload switch on the retrieval rail, an optional two-arm comparison, and `precompute/validate_cohorts.py` as the honesty gate.
-Design and every measurement: `docs/cohort_retrieval.md`.
+Design and every measurement: [`docs/design-notes.md`](docs/design-notes.md#cohort-retrieval).
 
 **A cohort is study x tissue x spaceflight arm by default, and the user can retune it.**
 That is the ISA-Tab factor grouping OSDR already curates: 212 cohorts with two or more members across 70 studies, median 10, max 38, grouping 2,105 of the 2,108 embedded samples.
@@ -246,7 +500,7 @@ The reaping is PID-tagged rather than signal-based, and the reason is worth keep
 
 **One observation, deliberately not acted on:** after a failed embed the network is replaced with "Embedding failed" while the inspector still describes the *previous* successful query, because the failure path returns `no_update` for `hits-store`. It is a mixed state. Clearing it would mean clearing `hits-store`, which lives on the shell so the map can draw a retrieval you ran before walking over to it - so this is a cross-view semantics decision, not a local fix, and it is Josh's call.
 
-**Cohort pooling was measured and specified, not built.** Full analysis in `docs/cohort_pooling.md`; the headline is that the measurements change why the feature is worth building.
+**Cohort pooling was measured and specified, not built.** Full analysis in [`docs/design-notes.md`](docs/design-notes.md#cohort-pooling); the headline is that the measurements change why the feature is worth building.
 Mean pooling is exactly "average the members' cosine scores", weighted by L2 norm - so normalize each member first, because invariant 2 already establishes that norm is transcriptome concentration and not a nuisance scale. Averaging embeddings was checked against the biological alternative on five real cohorts: the pseudo-bulk embedding (counts summed, embedded live through `embed_upload.py`) sits **closer to the spherical centroid than the cohort's own members do**, in all five, so the centroid is not an off-manifold artifact.
 The premise needs correcting, though. Cohorts have almost no outlier problem - mean pairwise cosine 0.9933 against 0.8826 for random same-size groups - and yet **two replicates of the same cohort share on average 0.13 of their top-5 hits**, sometimes nothing at all. The cause is a scale mismatch: the entire top-500 of the 940,455-sample index spans a cosine range comparable to the gap between two animals in the same cage. Pooling raises leave-one-out top-5 stability from 0.13 to **0.78**, and that six-fold gain, not outlier protection, is the case for the feature.
 The caveat to carry: random samples from the same *study* already reach 0.9805, closing 84% of the distance to a real cohort, so most of a cohort's coherence is batch. A within-study null is the first thing to run before shipping.
@@ -297,7 +551,7 @@ The Retrieve view can now take an OSDR sample the corpus has never seen: upload 
 
 **Validated end to end on the real model and corpus.** Embedding OSD-100's own counts file through the upload path reproduces its precomputed cached vector at **cosine 1.00000000, max abs diff 0.0** - the definitive check that scores are comparable. A full uploaded search of the eye sample `Mmus_C57-6J_EYE_FLT_Rep1_M23` against all 940,455 ARCHS4 samples returns eye-tissue analogs (GSM6204794, GSM4256053) in its top 5, annotated and locatable on the map. Input contract: mouse Ensembl-indexed counts CSV/TSV (OSDR is Mus musculus); a file that maps zero orthologs, or a digest mismatch, is refused with a clean one-line reason, never embedded into a meaningless vector.
 
-UI: a `dcc.Upload` dropzone and a sample-column picker in the Retrieve rail, a separate Embed-&-search callback writing the shared outputs with `allow_duplicate=True`. Downstream callbacks (details, AI summary, See-on-map) resolve the query row from a `query` dict now carried in the hits-store payload, so they work for a sample that is not in `samples_df`. Flask `MAX_CONTENT_LENGTH` capped at 200 MB. Tests 219 (8 new in `test_upload_ingestion.py`, including the live-vs-cached parity gate and the gene-digest abort). Design doc: `docs/file_ingestion.md`.
+UI: a `dcc.Upload` dropzone and a sample-column picker in the Retrieve rail, a separate Embed-&-search callback writing the shared outputs with `allow_duplicate=True`. Downstream callbacks (details, AI summary, See-on-map) resolve the query row from a `query` dict now carried in the hits-store payload, so they work for a sample that is not in `samples_df`. Flask `MAX_CONTENT_LENGTH` capped at 200 MB. Tests 219 (8 new in `test_upload_ingestion.py`, including the live-vs-cached parity gate and the gene-digest abort). Design doc: [`docs/design-notes.md`](docs/design-notes.md#file-ingestion).
 
 ## 2026-07-23 (spectral init restores the species separation)
 

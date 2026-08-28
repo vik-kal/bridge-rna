@@ -54,6 +54,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  /* Contains the radio input, which is taken out of flow below rather than
+     removed from the page. */
+  position: relative;
   padding: 7px 6px;
   font-size: 12.5px;
   font-weight: 500;
@@ -64,13 +67,33 @@
   user-select: none;
   transition: background 0.12s, color 0.12s, box-shadow 0.12s;
 }
-/* The radio itself carries the state but adds nothing visually. */
-.bm-seg .dash-options-list-option-wrapper { display: none; }
-.bm-seg .dash-options-list-option-text { display: block; text-align: center; }
+/* The radio itself carries the state but adds nothing visually - so it is
+   hidden from the eye and *kept on the page*. It used to be `display: none`,
+   which takes an element out of the tab order and out of the accessibility
+   tree as well as out of the picture: Projection, Dimensions and the number of
+   ARCHS4 points - three of the map's six controls - could not be reached or
+   operated by keyboard at all. The `:focus-within` rule below has been sitting
+   here the whole time and could never fire, which is what gave it away.
+
+   Clipped rather than `opacity: 0` on a full-size input, because a
+   transparent radio would still take the click that belongs to the label. */
+.bm-seg .dash-options-list-option-wrapper {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: 0; padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+/* `color: inherit` is load-bearing: Dash paints the selected option's *text
+   span* from its own interactive token, which is --accent, so the selected
+   pill's label stayed at 3.76:1 while the label element around it had already
+   been moved to --accent-text. Inheriting is what lets one rule below decide
+   the color for both. */
+.bm-seg .dash-options-list-option-text { display: block; text-align: center; color: inherit; }
 .bm-seg .dash-options-list-option:hover { color: var(--text-primary); }
 .bm-seg .dash-options-list-option.selected {
   background: var(--bg-panel);
-  color: var(--accent);
+  color: var(--accent-text);
   box-shadow: var(--shadow);
   font-weight: 600;
 }
@@ -127,6 +150,135 @@
 /* Dropdown (Dash 4 dcc.Dropdown: a radix popover, not react-select).
    The menu is portaled to the end of <body>, so its rules cannot be scoped
    under .bm-rail and are written globally. */
+/* The find box. The class lands on Dash's wrapper div and the id lands on the
+   inner `<input>`, so the box is drawn on the wrapper and the ring is
+   `:focus-within` on that same wrapper - the two must be on one element, or a
+   ring is drawn inside a ring. Same arrangement as .bm-legend-search, which is
+   the other dcc.Input on this view; the difference is only that this one sits
+   on the light rail rather than on the dark canvas. */
+.bm-find-input {
+  width: 100%;
+  font-size: 13px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+.bm-find-input:hover { border-color: #c3cfdf; }
+.bm-find-input:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+/* The wrapper carries the box, so the input inside it must not draw a second
+   one. Scoped to this control rather than to `.dash-input-element` at large,
+   which would also reach the legend filter on the dark canvas - the exact
+   over-reach `test_the_retrieval_input_rules_cannot_reach_the_map` exists for,
+   arriving from the other direction. */
+.bm-find-input input {
+  width: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  font: inherit;
+  color: var(--text-primary);
+  padding: 0;
+}
+.bm-find-input input::placeholder { color: var(--text-muted); }
+
+/* ---- The suggestion list ------------------------------------------------
+   Inline under the box, not floating. The rail is a scroll container, so an
+   absolutely-positioned popup would be clipped by it or would scroll away from
+   the field it belongs to; inline it is always attached and always in flow.
+
+   `max-height` is what keeps "compact" true. Ten suggestions in a window about
+   five and a half rows tall means the sixth row is visibly cut, which is the
+   affordance that says the list scrolls - a window sized to a whole number of
+   rows looks complete when it is not. The rail never grows past this no matter
+   what is typed.
+
+   Two independent facts decide whether this is on screen, and each has exactly
+   one owner. `:empty` is the server's: no rows, nothing to show. `.is-closed`
+   is the browser's: Escape, a click outside, a row chosen. Neither writes an
+   inline style, so they compose instead of racing - which is the whole reason
+   the open/closed state lives in a class rather than in a callback. */
+.bm-suggest {
+  margin-top: 6px;
+  max-height: 196px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  box-shadow: 0 6px 20px rgba(20, 41, 74, 0.14), 0 2px 6px rgba(20, 41, 74, 0.08);
+  padding: 3px;
+}
+.bm-suggest:empty { display: none; }
+#find-group.is-closed .bm-suggest { display: none; }
+.bm-suggest::-webkit-scrollbar { width: 6px; }
+.bm-suggest::-webkit-scrollbar-thumb {
+  background: rgba(120, 150, 195, 0.4); border-radius: 3px;
+}
+
+/* Identifier above, what distinguishes it below.
+
+   Two lines rather than one, and this was measured rather than preferred. Side
+   by side on a 268 px rail the two compete for about 220 px, and the row that
+   loses is decided by CSS rather than by which half matters: with both at the
+   default shrink, "GSM5028824" beside "GSE165242 · Embryo / stem cell" ellipsed
+   to "GSM502…" - the accession, the one string in the row that cannot be
+   inferred from the rest of it. Weighting the shrink towards the detail helped
+   and did not fix it, because any shrink at all on a 78 px label truncates it;
+   only `flex-shrink: 0` keeps it whole, and that spends the detail down to
+   "OSD-100 · l…" instead. Neither half is expendable: for the OSDR samples the
+   names differ in their last characters (Rep1_M23 against Rep2_M24), which is
+   exactly what an ellipsis eats.
+
+   Stacked, both are whole at every width, at a cost of about 11 px per row -
+   which the max-height above absorbs by showing four rows and part of a fifth
+   instead of five and part of a sixth. The list still scrolls, still holds ten,
+   and no longer hides the thing a reader is scanning for. */
+.bm-suggest-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  /* WCAG 2.2 SC 2.5.8 puts the floor for a pointer target at 24x24 CSS px. */
+  min-height: 24px;
+}
+/* Hover and keyboard get the same treatment, because they mean the same thing:
+   this is the row that Enter or a click would take. */
+.bm-suggest-row:hover,
+.bm-suggest-row.is-active { background: var(--accent-soft); }
+.bm-suggest-row.is-active { box-shadow: inset 2px 0 0 var(--accent); }
+/* Both lines still ellipse rather than wrap. Nothing in the corpus is long
+   enough to need it at this width - it is the guard that keeps a row one row
+   tall whatever a future metadata join puts in it, so the list's height stays a
+   function of how many suggestions there are and not of what they say. */
+.bm-suggest-label,
+.bm-suggest-detail {
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bm-suggest-label { font-size: 12px; color: var(--text-primary); }
+.bm-suggest-detail { font-size: 11px; color: var(--text-secondary); }
+/* A well-formed identifier this map does not carry. Not a row: there is
+   nothing to select, so it must not look selectable. */
+.bm-suggest-empty {
+  padding: 7px 8px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+/* The status and the button hang off the control they qualify, at the rail's
+   standing 9 px offset - the same one .bm-coverage and .bm-params use. */
+#find-status { margin-top: 9px; }
+#find-status:empty { display: none; }
+
 .bm-dropdown {
   font-size: 13px;
   min-height: 38px;
@@ -141,7 +293,7 @@
   font-size: 13px;
 }
 .dash-dropdown-content .dash-options-list-option { padding: 7px 11px; border-radius: 6px; }
-.dash-dropdown-content .dash-options-list-option.selected { color: var(--accent); font-weight: 600; }
+.dash-dropdown-content .dash-options-list-option.selected { color: var(--accent-text); font-weight: 600; }
 
 /* Layer checklist. The checkbox is restyled rather than replaced, so keyboard
    focus and the native checked state keep working. */
@@ -194,10 +346,18 @@
    canvas on every control change. */
 .bm-plot-wrap .dash-loading-callback, .bm-plot-wrap ._dash-loading-callback { background: transparent !important; }
 
+/* The strip across the top of the canvas: what is drawn right now, and nothing
+   else. "Reset view" shared it until 2026-08-13 and now sits on the rail beside
+   the two buttons that frame.
+
+   `pointer-events: none` is what keeps the badges from eating drags meant for
+   the plot underneath. */
 .bm-plot-badges {
   position: absolute; top: 12px; left: 14px; z-index: 6;
-  display: flex; gap: 8px; flex-wrap: wrap; pointer-events: none;
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  pointer-events: none;
 }
+.bm-badges { display: contents; }
 .bm-badge {
   background: rgba(14, 29, 52, 0.82);
   color: #cfe0f7;
@@ -240,10 +400,33 @@
   background: rgba(255,255,255,0.06);
   border: 1px solid rgba(120,150,195,0.35);
   border-radius: 6px; color: #e6eefb; font-size: 12px;
-  padding: 5px 8px; margin-bottom: 8px; width: 100%; outline: none;
+  padding: 5px 8px; width: 100%; outline: none;
 }
+/* The margin belongs to the wrapper, which is what the callback shows and
+   hides; on the field itself it would survive as a gap when the field is
+   gone. */
+#legend-search-group { margin-bottom: 8px; }
 .bm-legend-search::placeholder { color: #7089a8; }
+/* `outline: none` above kills the default ring, and this field is the only
+   control sitting on the dark canvas - so it needs a ring drawn for the dark
+   canvas rather than no ring at all. It was the one element in either view a
+   keyboard walk could land on with nothing to show for it.
+   `:focus-within`, because these class names land on Dash's wrapper div and
+   the element that actually takes focus is the `<input>` inside it. */
+.bm-legend-search:focus-within {
+  outline: 2px solid var(--header-line);
+  outline-offset: 1px;
+  border-color: var(--header-line);
+}
+/* `flex: none` on the rows is what makes the list scroll instead of squashing.
+   A column flex item shrinks below its content height by default, so once the
+   panel hit its own max-height the rows compressed into each other and the
+   counts lost their descenders - the list never scrolled, because there was
+   never any overflow to scroll. Seen at 393 px, where the panel is capped at
+   46% of the canvas; the same would happen on a desktop with enough categories
+   drawn to reach `calc(100% - 58px)`. */
 .bm-legend-list { overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.bm-legend-list > .bm-legend-item { flex: none; }
 .bm-legend-list::-webkit-scrollbar { width: 6px; }
 .bm-legend-list::-webkit-scrollbar-thumb { background: rgba(120,150,195,0.4); border-radius: 3px; }
 .bm-legend-item {
@@ -275,6 +458,7 @@
 /* The rule is on the modifier, not on `:not(:last-child)`: each key is the only
    child of its own slot div, so it is always a last child and the sibling
    selector could never fire. */
+.bm-key--found,
 .bm-key--retrieval {
   margin-bottom: 9px; padding-bottom: 9px;
   border-bottom: 1px solid rgba(90, 130, 185, 0.28);
@@ -287,6 +471,9 @@
   display: flex; align-items: center; gap: 8px;
   font-size: 12px; color: #cbd9ec; padding: 2px 2px;
   min-width: 0;
+  /* Same reason as .bm-legend-item: these are column flex items inside a
+     height-capped panel, and the default is to shrink rather than to overflow. */
+  flex: none;
 }
 .bm-key-count {
   margin-left: auto; padding-left: 6px;
@@ -365,6 +552,22 @@
   border: 2px solid #ffffff; border-radius: 50%;
 }
 
+/* A found sample: an X, white for the same measured reason the hit rings are
+   white - no hue clears 3:1 against the worst categorical tissue bucket on this
+   background, so shape is the channel and white is its ink.
+
+   One rule for both dimensionalities. The plot draws `x-open` in 2-D and `x` in
+   3-D only because Scatter3d's eight-symbol vocabulary has no `x-open`; they
+   are the same mark, and at 14 px an outlined X and a filled one are the same
+   handful of pixels, so keying them apart would invent a distinction the plot
+   is not making. */
+.bm-key-glyph.is-found {
+  background: #ffffff;
+  clip-path: polygon(20% 0%, 50% 30%, 80% 0%, 100% 20%, 70% 50%,
+                     100% 80%, 80% 100%, 50% 70%, 20% 100%, 0% 80%,
+                     30% 50%, 0% 20%);
+}
+
 /* The corpus shapes. Neutral-filled: these marks take their color from the
    color-by above, and the shape is the whole message. */
 .bm-key-glyph.is-corpus-archs4 {
@@ -410,7 +613,7 @@
   margin-top: 5px; background: #fdf6ea; border-radius: 6px; padding: 6px 8px;
 }
 
-a, a:visited { color: var(--accent); }
+a, a:visited { color: var(--accent-text); }
 
 /* A rail action. Quieter than the retrieval view's primary button: the map is
    read rather than driven, and this is the only button on the rail. */
@@ -421,7 +624,7 @@ a, a:visited { color: var(--accent); }
   font-family: inherit;
   font-size: 12px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--bg-panel);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -438,7 +641,103 @@ a, a:visited { color: var(--accent); }
   word-break: break-word;
   line-height: 1.35;
 }
-.bm-picked-study { color: var(--text-muted); }
+/* The record rows under the selected sample's name. Key left, value right, the
+   value taking the slack - the same shape as the retrieval view's detail rows,
+   and the reason for `min-width: 0` is the same too: a 39-character sample key
+   or a GEO title is one unbreakable run that would otherwise push the row wider
+   than the 268 px rail.
+
+   `.bm-picked-study` used to live here, for a "· OSD-100" suffix on the sample
+   name. The study is one of these rows now, so the suffix and its rule are
+   gone rather than left to rot. */
+.bm-picked-row {
+  display: flex; gap: 8px; align-items: baseline;
+  font-size: 11.5px; line-height: 1.45; margin-top: 5px;
+}
+.bm-picked-key { flex: none; color: var(--text-muted); }
+.bm-picked-value {
+  flex: 1 1 auto; min-width: 0;
+  color: var(--text-secondary); text-align: right; word-break: break-word;
+}
 
 /* dcc.Link renders an <a>; .bm-button is written for a <button>. */
 a.bm-button { display: block; text-align: center; text-decoration: none; }
+
+/* ==========================================================================
+   Responsive: two columns → rail above map
+
+   The map had no breakpoints at all until 2026-08-11, and the two fixed widths
+   in this file are what made that fail rather than merely tighten: a 268 px
+   rail and a 228 px floating key are 496 px of furniture, so on a 393 px phone
+   the plot was a 125 px strip and the key sat on top of the rail, covering the
+   projection pills and half the Layers group. Measured on the running app,
+   both views, before this block existed.
+
+   Retrieve already answers this by stacking its columns and handing the scroll
+   back to the document (retrieve.css, max-width: 1180px). The map does the
+   same, one breakpoint lower, because the rail is the narrower of the two and
+   the plot is the thing that must not be squeezed.
+   ========================================================================== */
+
+@media (max-width: 900px) {
+  /* The map is a viewport-locked instrument by default: an unbroken chain of
+     `flex: 1; min-height: 0` from the shell down to the canvas. Stacked, that
+     chain is what has to go, or the rail and the plot would divide one screen
+     between them and both would be too small. */
+  .bm-app { flex: none; min-height: 0; overflow: visible; }
+  .bm-body { flex-direction: column; }
+
+  .bm-rail {
+    width: auto;
+    overflow-y: visible;
+    border-right: none;
+    border-bottom: 1px solid var(--border-strong);
+    /* Above the map rather than beside it, the rail is wide and short instead
+       of narrow and tall, so the groups run across: one column on a phone,
+       three on a tablet, decided by the 210 px a control needs rather than by
+       a second breakpoint.
+
+       Columns rather than a grid, because the groups are wildly unequal in
+       height - "Your retrieval" is three paragraphs and a button, "Dimensions"
+       is two pills - and a grid row is as tall as its tallest cell, which left
+       about 250 px of empty rail under the short ones on an iPad. Columns
+       balance instead, and `break-inside` is what keeps a group whole. */
+    columns: 210px 3;
+    column-gap: var(--space-4);
+  }
+  .bm-group { margin-bottom: 16px; break-inside: avoid; }
+
+  /* An explicit height, because the plot no longer has a column to fill. Two
+     thirds of the viewport keeps the projection legible while leaving the rail
+     visible above it, and the floor keeps it a map rather than a band on a
+     short landscape phone. */
+  .bm-plot-wrap { flex: none; height: 68vh; min-height: 420px; }
+
+  /* Plotly parks its modebar at the top right of the canvas, which is where
+     the badges wrap into once the plot is narrow. */
+  .bm-plot-badges { max-width: calc(100% - 168px); }
+}
+
+/* Phone: the key has to stop being a panel and start being a caption. At 228 px
+   it covered 58% of a 393 px canvas. Narrowed and capped it costs about a
+   ninth of the plot, and the list inside it goes on scrolling, so nothing is
+   lost - only smaller. */
+@media (max-width: 620px) {
+  .bm-legend {
+    width: 184px;
+    right: 10px;
+    max-height: min(46%, 300px);
+    padding: 8px 9px;
+  }
+  .bm-legend-item, .bm-key-row { font-size: 11.5px; }
+  /* The count is what squeezes the name, and the name is the part that cannot
+     be guessed: "Blood / imm…" beside 155,761 tells you less than the whole
+     bucket beside a smaller number. */
+  .bm-legend-count, .bm-key-count { font-size: 10.5px; }
+  .bm-plot-badges { gap: 6px; top: 10px; left: 10px; }
+  .bm-badge { font-size: 11px; padding: 3px 9px; }
+  /* One column, and tighter: stacked, the rail stands between the reader and
+     the map, so every row it saves is a row of map above the fold. */
+  .bm-rail { padding: 14px 14px 16px; columns: 1; }
+  .bm-group { margin-bottom: 13px; }
+}

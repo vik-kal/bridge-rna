@@ -10,9 +10,11 @@ space back.
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from dash import dcc, html
 
-from . import colorby, data, render, theme
+from . import colorby, data, find, render, theme
 
 
 def color_by_label(value: str) -> str:
@@ -193,6 +195,24 @@ def resolve_budget(dims: str, current: str | None) -> str:
     return current if current in valid else default_budget(dims)
 
 
+def _group(label_id: str, label: str, *children):
+    """A rail group and the heading that names its controls, tied together.
+
+    The headings here are styled divs rather than `<label>`s, and the controls
+    under them are a Radix radio group, a Dash dropdown named by its own value,
+    and a checklist - none of which a `for` attribute can reach. So the group
+    carries the name: a screen reader announces "Projection" on entry and
+    "UMAP, selected, 1 of 3" after it, where before it announced only the
+    second half. Same pattern as `bridge_rna.layout._labelled`, and it changes
+    nothing visually.
+    """
+    return html.Div(
+        className="bm-group", role="group",
+        **{"aria-labelledby": label_id},
+        children=[html.Div(label, id=label_id, className="bm-group-label"), *children],
+    )
+
+
 def _segmented(id_: str, options: list[dict], value: str):
     """A radio group styled as a segmented pill control.
 
@@ -204,35 +224,45 @@ def _segmented(id_: str, options: list[dict], value: str):
     return dcc.RadioItems(id=id_, options=options, value=value, className="bm-seg")
 
 
-def control_rail() -> html.Div:
+def control_rail() -> html.Aside:
     n_archs4, n_osdr, _ = data.counts()
 
-    return html.Div(
+    return html.Aside(
         className="bm-rail",
+        **{"aria-labelledby": "map-controls-heading"},
         children=[
+            # The map view had one heading (the shell's H1) and no landmark
+            # below the header, so a screen reader arriving here found a page
+            # with a title and no structure - where the retrieval view already
+            # offered a nav, a controls aside, a main and an inspector aside.
+            # The heading is hidden because the rail's own group labels already
+            # say what each control is and a visible "Map controls" would only
+            # repeat the page.
+            html.H2("Map controls", id="map-controls-heading",
+                    className="visually-hidden"),
             # The parameter readout sits directly under the control it
             # describes, which is the same rule the color-by coverage readout
             # below follows: the fact that qualifies a control belongs against
             # that control, not in a tooltip and not in the plot badges, which
             # report what is drawn right now and change on every zoom.
-            html.Div(className="bm-group", children=[
-                html.Div("Projection", className="bm-group-label"),
+            _group(
+                "projection-label", "Projection",
                 _segmented("method", method_options(), default_method()),
                 html.Div(id="method-params", className="bm-params"),
-            ]),
-            html.Div(className="bm-group", children=[
-                html.Div("Dimensions", className="bm-group-label"),
+            ),
+            _group(
+                "dims-label", "Dimensions",
                 _segmented("dims", [
                     {"label": "2D", "value": "2d"},
                     {"label": "3D", "value": "3d"},
                 ], "2d"),
-            ]),
+            ),
             # The color-by group carries its own coverage readout, so the answer
             # to "how much of this map is this field actually coloring?" sits
             # next to the control that decides it rather than being inferred
             # from how grey the plot looks.
-            html.Div(className="bm-group", children=[
-                html.Div("Color by", className="bm-group-label"),
+            _group(
+                "color-by-label", "Color by",
                 dcc.Dropdown(
                     id="color-by",
                     options=colorby.menu_options(),
@@ -242,9 +272,9 @@ def control_rail() -> html.Div:
                 ),
                 html.Div(id="coverage", className="bm-coverage"),
                 html.Div(id="color-by-hint", className="bm-hint"),
-            ]),
-            html.Div(className="bm-group", children=[
-                html.Div("Layers", className="bm-group-label"),
+            ),
+            _group(
+                "layers-label", "Layers",
                 dcc.Checklist(
                     id="layers",
                     options=[
@@ -254,27 +284,122 @@ def control_rail() -> html.Div:
                     value=["archs4", "osdr"],
                     className="bm-checklist",
                 ),
-            ]),
+            ),
             # In 2-D the glyph sample can carry the whole corpus (the density
             # raster it used to sit above is gone, so the sample is the only
             # thing drawing those points). In 3-D the tiers stop at the rotation
             # cap; budget_options() decides, and callbacks.sync_budget_to_dims
             # swaps the tiers when the dimensionality changes.
-            html.Div(className="bm-group", children=[
-                html.Div("ARCHS4 point budget", className="bm-group-label"),
+            # The label names the quantity. It used to name the mechanism - the
+            # word was "budget" - which was the rail's only piece of
+            # implementation vocabulary, on a control whose four pills already
+            # read 100k / 250k / 500k / All. The old wording is pinned in
+            # `tests/test_app.py::REMOVED_COPY`.
+            #
+            # The component id stays `budget`. It is internal, three callbacks
+            # and two test modules name it, and renaming it would be churn with
+            # no reader on the other end.
+            _group(
+                "budget-label", "Number of ARCHS4 points",
                 _segmented("budget", budget_options("2d"), default_budget("2d")),
-            ]),
+            ),
+            # "Where did this study land?" - the one question the map could not
+            # be asked until now. It sits here, after the controls that decide how
+            # the map is drawn and immediately above the panel that describes
+            # whatever is currently selected, because the control and its result
+            # belong together: that is the same rule that puts the coverage
+            # readout under the color-by and the parameter chips under the
+            # projection pills.
+            #
+            # A real `<label for>`, unlike every other group on this rail. Dash
+            # renders a Dropdown as a button and a Slider as a Radix thumb, and
+            # neither is a labelable element, which is why they need the
+            # `role="group"` wrapper `_group` builds. `dcc.Input` puts the id on
+            # the actual `<input>` - verified in the DOM, and it is the one
+            # place Dash's id and className land on different elements - so this
+            # control can be named the ordinary way.
+            html.Div(
+                id="find-group", className="bm-group", role="group",
+                **{"aria-labelledby": "find-label"},
+                children=[
+                    html.Label("Find a study", id="find-label",
+                               className="bm-group-label", htmlFor="find-input"),
+                    dcc.Input(
+                        id="find-input", type="text",
+                        className="bm-find-input",
+                        # `debounce=False`, which is a change and is the whole
+                        # reason the suggestions can exist: Dash's `debounce`
+                        # means "publish the value on Enter or blur", so with it
+                        # on there is no per-keystroke value to complete. The
+                        # commit is not lost, it is made explicit - `n_submit`
+                        # and `n_blur` are exactly the two events `debounce` was
+                        # firing on, and they are Inputs to `resolve_find` now.
+                        # That split is what keeps a 942,563-point figure from
+                        # being rebuilt on every letter of "GSM4256053".
+                        debounce=False,
+                        # The browser's own history dropdown would sit on top of
+                        # ours, offering whatever this user last typed into a
+                        # box called `find-input` on any page.
+                        autoComplete="off",
+                        # The placeholder still carries the grammar, because it
+                        # is what an empty box says and the list has nothing to
+                        # offer until something is typed.
+                        #
+                        # Its length is measured, not judged. The field is
+                        # 215 px wide inside its padding on the 268 px rail, and
+                        # an earlier four-grammar wording rendered at 237 px, so
+                        # it taught three formats and then trailed off in the
+                        # middle of the fourth. Two grammars leave room to spell
+                        # both out.
+                        # `test_the_find_placeholder_fits_its_box` in
+                        # `tests/e2e_check.py` re-measures it in the browser,
+                        # because no Python assertion can.
+                        placeholder="GSE143281 or OSD-100",
+                        # The combobox semantics - role, aria-autocomplete,
+                        # aria-controls, aria-expanded, aria-activedescendant -
+                        # are set by `assets/find-suggest.js` and not here.
+                        # `dcc.Input` declares no `aria-*` or `role` wildcard in
+                        # Dash 4, so passing them raises at layout time rather
+                        # than being ignored. That is the right place for them
+                        # anyway: three of the five are live state that only the
+                        # code operating the list can keep true, and the feature
+                        # does not exist without that file.
+                    ),
+                    # The suggestion list. Inline rather than floating: the rail
+                    # scrolls, so an absolutely-positioned popup would either be
+                    # clipped by that scroll container or detach from the box it
+                    # belongs to. Inline, it is bounded by its own max-height
+                    # and pushes the panels below it down for as long as it is
+                    # open, which is a change the reader caused and can undo.
+                    #
+                    # Empty when there is nothing to offer, and hidden by
+                    # `:empty` rather than by a style this or any callback
+                    # writes. Whether it is *open* is the browser's business -
+                    # Escape, a click outside, a chosen row - and lives in one
+                    # class on the group above. Two independent facts, one
+                    # owner each, composed by CSS into one `display`.
+                    html.Div(
+                        id="find-suggestions", className="bm-suggest",
+                        role="listbox",
+                        **{"aria-label": "Matching samples"},
+                    ),
+                    html.Div(id="find-status", className="bm-hint"),
+                    html.Button("Frame it", id="frame-find", n_clicks=0,
+                                className="bm-button",
+                                style={"display": "none"}),
+                ],
+            ),
             # Clicking an OSDR point offers a retrieval for it. Hidden until
             # something is clicked; the map is read rather than driven, so this
             # is an offer that appears in response to interest, not a control
             # sitting on the rail waiting to be understood.
+            # Its children are callback output because they differ by corpus:
+            # an OSDR sample offers a retrieval and a GEO sample offers its NCBI
+            # record, and those are a `dcc.Link` and an `<a>` respectively - not
+            # one component with a swapped href. The group itself stays declared
+            # so Dash can still validate the callback graph against it.
             html.Div(id="picked-group", className="bm-group",
-                     style={"display": "none"}, children=[
-                html.Div("Selected sample", className="bm-group-label"),
-                html.Div(id="picked-label", className="bm-picked"),
-                dcc.Link(id="picked-link", href="/", className="bm-button",
-                         children="Retrieve its Earth analogs →"),
-            ]),
+                     style={"display": "none"}),
             # Shown only when there is a retrieval to show. Declared here
             # rather than created by a callback so Dash can validate the
             # callback graph against it at startup: a component that exists
@@ -292,22 +417,50 @@ def control_rail() -> html.Div:
                 html.Div(id="retrieval-summary", className="bm-hint"),
                 html.Button("Frame the retrieval", id="frame-retrieval",
                             n_clicks=0, className="bm-button"),
-                # What each mark means now lives in the key on the plot, beside
-                # the marks. What stays here is the one thing the picture cannot
-                # show: that a hit carries two different orderings, and the
-                # nearer of two hits on screen is not the better one.
-                # Not "into two". This div is static and the group stays on
-                # screen in 3-D, where that would be a false statement to a
-                # reader looking at three axes - the same class of error as a
-                # parameter chip naming one t-SNE gradient method for both
-                # dimensionalities. The claim is true of any projection, so it
-                # is made that way rather than made dims-aware.
-                html.Div(
-                    "Hover a hit for its rank in the search and its rank on "
-                    "the map. The two disagree: a projection cannot preserve "
-                    "512-dimensional distances.",
-                    className="bm-hint",
-                ),
+                # What each mark means lives in the key on the plot, beside the
+                # marks. Nothing else belongs here.
+                #
+                # A standing paragraph used to, telling the reader to hover a hit
+                # for its two ranks and warning that a projection cannot
+                # preserve 512-dimensional distances. Removed on 2026-08-11. The
+                # disagreement it described is real and is still shown -
+                # `render._map_ranks` puts both ranks in every hit's hover, which
+                # is where a reader meets the fact at the moment it applies - so
+                # the rail was spending three permanent lines telling the reader
+                # to go and read a tooltip. The sentence is pinned in
+                # `tests/test_app.py::REMOVED_COPY`, hence described not quoted.
+            ]),
+            # Every viewport action on one rail, in the order they are reached:
+            # frame a find, frame a retrieval, then undo whichever of them - or
+            # the reader's own scroll-zoom - narrowed the map.
+            #
+            # **Reset view used to sit on the plot**, on the argument that it
+            # qualifies the viewport and the viewport belongs to the plot. That
+            # argument was true and still split one feature across two surfaces:
+            # the button that framed the map was on the rail and the button that
+            # unframed it was most of a screen away on the canvas, so the two
+            # could not be read as a pair and the reader who framed something had
+            # to go looking for the way back. Undoing an action belongs beside
+            # the action.
+            #
+            # There is still exactly one of it, for the reason there always was:
+            # framing a find, framing a retrieval and a plain scroll-zoom all
+            # write the same `viewport-store` and are the same state by the time
+            # they arrive, so one control reverses all three. A button per frame
+            # button would be two writers for one piece of state and neither
+            # would answer a scroll-zoom.
+            #
+            # Declared here and hidden rather than created by a callback, for the
+            # reason the legend's parts are: Dash validates its callback graph
+            # against the initial layout, and an id that only ever exists as
+            # callback output fails silently in the browser rather than loudly at
+            # startup.
+            html.Div(id="view-group", className="bm-group",
+                     style={"display": "none"}, children=[
+                html.Div("View", className="bm-group-label"),
+                html.Button("Reset view", id="reset-view", n_clicks=0,
+                            className="bm-button",
+                            title="Return to the whole map"),
             ]),
         ],
     )
@@ -451,6 +604,124 @@ def retrieval_key_children(overlay: dict | None, roles: tuple[str, ...],
     return [html.Div(className="bm-key bm-key--retrieval", children=rows)]
 
 
+def suggestion_children(suggestions: dict | None) -> list:
+    """The rows inside the suggestion listbox.
+
+    Each row is a real option in a real listbox: `role="option"` under the
+    `role="listbox"` the layout declares, so a screen reader announces "3 of 10"
+    rather than reading ten unlabelled divs. The row is a `<div>` and not a
+    `<button>` deliberately - a button inside a listbox is announced as a button
+    and takes its own place in the tab order, and an ARIA combobox keeps focus
+    in the text field and moves a *virtual* cursor instead.
+
+    The identifier its `id` carries is what the click callback reads, so the
+    value a row commits is the value the row was built from and there is no
+    index into a list that a re-render could invalidate.
+
+    A miss gets one flat row rather than an empty box, and only when the query
+    was the right *shape* to have matched: "no sample matches GSM99999999" is
+    worth saying, where a dropdown volunteering "no matches" under the word
+    "liver" would contradict the sentence below the box, which correctly says
+    that free text is not what this control takes.
+    """
+    suggestions = suggestions or {}
+    items = suggestions.get("items") or []
+    if not items:
+        if suggestions.get("reason") == find.ABSENT:
+            return [html.Div("Nothing on this map matches that.",
+                             className="bm-suggest-empty")]
+        return []
+    return [
+        html.Div(
+            id={"type": "find-suggestion", "value": str(item["value"])},
+            className="bm-suggest-row",
+            role="option",
+            n_clicks=0,
+            **{"aria-selected": "false"},
+            children=[
+                html.Span(str(item["label"]), className="bm-suggest-label"),
+                html.Span(str(item["detail"]), className="bm-suggest-detail",
+                          title=str(item["detail"])),
+            ],
+        )
+        for item in items
+    ]
+
+
+def selected_panel_children(record: dict | None) -> list:
+    """The rail panel describing whatever is currently selected.
+
+    One panel for both ways of selecting: clicking an OSDR diamond, and finding
+    anything. They are the same question - what is this sample - so two panels
+    answering it would be the clutter this feature exists to avoid.
+
+    The action at the bottom differs by corpus, and the difference is not
+    cosmetic. An OSDR sample offers a retrieval, which is an in-app navigation
+    and therefore a `dcc.Link`. A GEO sample offers its NCBI record, which is
+    an external URL and therefore an `<a>`: a `dcc.Link` pointing off-site hands
+    the href to Dash's client-side router, which tries to resolve it as an
+    application route instead of leaving the page.
+    """
+    if not record:
+        return []
+    rows = [
+        html.Div(className="bm-picked-row", children=[
+            html.Span(k, className="bm-picked-key"),
+            html.Span(v, className="bm-picked-value"),
+        ])
+        for k, v in record.get("rows") or []
+    ]
+    children = [
+        html.Div("Selected sample", className="bm-group-label"),
+        html.Div(str(record.get("title") or ""), className="bm-picked"),
+        *rows,
+    ]
+    if record.get("sample_key"):
+        children.append(dcc.Link(
+            "Retrieve its Earth analogs →", className="bm-button",
+            href=f"/?q={quote(str(record['sample_key']))}"))
+    elif record.get("geo"):
+        children.append(html.A(
+            "Open the GEO record →", className="bm-button",
+            href=f"{find.GEO_ACC_URL}{quote(str(record['geo']))}",
+            target="_blank", rel="noopener noreferrer"))
+    return children
+
+
+def found_key_children(found: dict | None) -> list:
+    """The key row for a found identifier.
+
+    A mark with no row is a glyph a reader can only decode by hovering it, which
+    is the whole finding `docs/design-notes.md#map-key` records - and this one is the fifth
+    encoding the map can carry at once, so it earns a row rather than being the
+    exception.
+
+    The count is what is *drawn*, following the same rule as every other row
+    here, so a series past `FIND_MAX_MARKS` reports the cap rather than the
+    total. The plot badge carries "500 of 8,764"; a key row saying 8,764 beside
+    500 visible marks would be the count rule broken in the one place it is most
+    obviously checkable.
+
+    Unlike the member mark, this one needs no dimensionality argument. A star
+    becomes a diamond in 3-D because `Scatter3d` has no star and a diamond is a
+    genuinely different shape; here both spellings - `x-open` in 2-D and `x` in
+    3-D, since `Scatter3d` rejects the first - draw the same X, so the key is
+    the same row in both views and says so with one class.
+
+    White comes from the stylesheet rather than from `theme` through an inline
+    style, which is the hit rings' arrangement and for the hit rings' reason:
+    white here is the shape channel's ink, not a hue identifying anything, so
+    there is no per-cohort value that could drift out of step with the plot.
+    """
+    points = (found or {}).get("points") or []
+    if not points:
+        return []
+    drawn = min(len(points), theme.FIND_MAX_MARKS)
+    return [html.Div(className="bm-key bm-key--found", children=[
+        _key_row("found", str(found.get("label") or "found"), drawn),
+    ])]
+
+
 def corpus_key_children(layers: list | None) -> list:
     """The shape key for the two corpora, under the color list.
 
@@ -487,21 +758,36 @@ def legend_panel() -> html.Div:
     callback output cannot be checked - a typo in one of their ids fails
     silently at runtime instead of loudly at startup.
 
-    The three sections are ordered by how transient each is. The retrieval sits
-    at the top because it is the thing the reader just asked for and the thing
-    that will be gone next search; the color list is the standing state of the
-    map and is the only part that scrolls; the corpus shapes are a footnote and
-    never change. Only the middle one can grow, so only the middle one scrolls.
+    The four sections are ordered by how transient each is. A found sample sits
+    above even the retrieval, because it is the most fleeting mark on the map -
+    it is replaced by the next thing typed into the box, where a retrieval
+    survives until the next search on the other view; the color list is the
+    standing state of the map and is the only part that scrolls; the corpus
+    shapes are a footnote and never change. Only the color list can grow, so
+    only the color list scrolls.
     """
     return html.Div(
         id="legend", className="bm-legend", style={"display": "none"},
         children=[
+            html.Div(id="legend-found"),
             html.Div(id="legend-retrieval"),
             html.Div(id="legend-color", className="bm-legend-section", children=[
                 html.Div(id="legend-title", className="bm-legend-title"),
-                dcc.Input(id="legend-search", className="bm-legend-search",
-                          placeholder="filter categories…", type="text",
-                          debounce=False, style={"display": "none"}),
+                # The label and the field are hidden and shown as one unit, so
+                # a screen reader never meets an orphan label describing a
+                # field that is not there. dcc.Input puts the id on the input
+                # element, so this is a real label association rather than the
+                # group wrapper the dropdowns need; it is hidden from the eye
+                # because the heading above already says what the list is, and
+                # the placeholder that was doing this job stops being a name
+                # the moment anything is typed into it.
+                html.Div(id="legend-search-group", style={"display": "none"}, children=[
+                    html.Label("Filter the color categories", htmlFor="legend-search",
+                               className="visually-hidden"),
+                    dcc.Input(id="legend-search", className="bm-legend-search",
+                              placeholder="filter categories…", type="text",
+                              debounce=False),
+                ]),
                 html.Div(id="legend-list", className="bm-legend-list"),
             ]),
             html.Div(id="legend-corpus"),
@@ -521,8 +807,14 @@ def build_view() -> html.Div:
     return html.Div(className="bm-app", children=[
         html.Div(className="bm-body", children=[
             control_rail(),
-            html.Div(className="bm-plot-wrap", children=[
-                html.Div(id="plot-badges", className="bm-plot-badges"),
+            html.Main(className="bm-plot-wrap", **{"aria-label": "Embedding map"}, children=[
+                # The strip across the top of the canvas: what is drawn right
+                # now. Nothing else. "Reset view" used to share it and moved to
+                # the rail on 2026-08-13, next to the two buttons that frame -
+                # see the `view-group` comment in `control_rail` for why.
+                html.Div(className="bm-plot-badges", children=[
+                    html.Div(id="plot-badges", className="bm-badges"),
+                ]),
                 legend_panel(),
                 # dcc.Loading wraps its children in two nested divs of its own.
                 # Both need an explicit full height or the chain from
@@ -548,6 +840,16 @@ def build_view() -> html.Div:
                             "displaylogo": False,
                             "scrollZoom": True,
                             "displayModeBar": True,
+                            # Plotly sizes its canvas once and keeps it unless
+                            # told otherwise. The plot's container changes size
+                            # for reasons that have nothing to do with a
+                            # callback - the stacked breakpoint below 900 px, a
+                            # phone rotating, a window being dragged - and
+                            # without this the scatter kept the geometry it was
+                            # first laid out with and drew a quadrant of the
+                            # corpus into the whole canvas. The retrieval
+                            # view's graph has always set it.
+                            "responsive": True,
                             # No selection feature exists, so neither selection
                             # tool is offered. Leaving lasso2d on the modebar
                             # would let a user draw a marquee that does nothing.
@@ -561,4 +863,20 @@ def build_view() -> html.Div:
         ]),
         dcc.Store(id="viewport-store"),
         dcc.Store(id="legend-store"),
+        # Declared here rather than created by a callback, for the reason the
+        # legend's parts are: Dash validates its callback graph against the
+        # initial layout, so an id that only ever exists as callback output
+        # fails silently at runtime instead of loudly at startup.
+        dcc.Store(id="find-store"),
+        # One chosen suggestion, and the only reason it is a store rather than
+        # the click itself: a pattern-matching `ALL` input fires whenever its
+        # family is re-rendered, which for the suggestion rows is every
+        # keystroke. Dash discards the answer to a request that a newer request
+        # for the same callback supersedes, so with that input on the callback
+        # that searches, the keystroke-driven no-op overtook the Enter that had
+        # already been answered - the first find of every session was lost, and
+        # the rest survived on timing. This store changes only when a row is
+        # actually clicked, so the search callback is never woken with nothing
+        # to do. See `callbacks.choose_suggestion`.
+        dcc.Store(id="find-chosen"),
     ])

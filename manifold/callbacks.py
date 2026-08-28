@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from urllib.parse import quote
+import numpy as np
+from dash import ALL, Input, Output, State, ctx, html, no_update
 
-from dash import Input, Output, State, ctx, html, no_update
-
-from . import colorby, data, layout, render
+from . import colorby, data, find, layout, render, theme
 
 # The legend search only earns its space once the list is long enough to be
 # hard to scan; below that it is chrome.
@@ -180,38 +179,32 @@ def _viewport_from_relayout(relayout: dict | None):
     return "unchanged"
 
 
-def _frame_for(hits_payload, method: str, dims: str,
-               roles: tuple[str, ...] = (ROLE_A, ROLE_B)):
-    """A viewport containing the query and every hit, with room to breathe.
+def frame_points(points, method: str, dims: str):
+    """A viewport containing every point given, with room to breathe.
+
+    The geometry behind both framing actions - the retrieval's and the find's -
+    so the two cannot drift into padding the same map differently.
 
     At full-corpus zoom a retrieval's points are a few pixels apart - the hits
     really are that close, which is the finding - so the rings overlap into one
-    illegible mark. Framing is what makes them separately readable, and it is
-    offered as an action rather than done automatically: arriving already
-    zoomed in would hide the thing worth seeing first, which is *where in the
-    whole corpus* the query landed.
-
-    It frames what is actually ticked, so a comparison with one arm hidden
-    frames the arm on screen rather than a window sized for both.
+    illegible mark. Framing is what makes them separately readable, and in both
+    callers it is offered as an action rather than done automatically: arriving
+    already zoomed in would hide the thing worth seeing first, which is *where
+    in the whole corpus* the points landed.
 
     Returns None (the whole map) if there is nothing to frame, or in 3-D, where
     the viewport store does not drive the camera.
     """
     if dims != "2d":
         return None
-    overlay = _retrieval_overlay(hits_payload, roles)
-    if overlay is None:
-        return None
-    points = list(overlay["hit_points"])
-    if overlay["query_point"] is not None:
-        points.append(overlay["query_point"])
     coords = data.coords(method, "2d")
-    if not points or coords.shape[0] == 0:
+    if coords.shape[0] == 0:
+        return None
+    inside = [int(p) for p in (points or []) if 0 <= int(p) < coords.shape[0]]
+    if not inside:
         return None
 
-    import numpy as np
-
-    xy = coords[np.asarray(points), :2]
+    xy = coords[np.asarray(inside), :2]
     x0, y0 = xy.min(axis=0)
     x1, y1 = xy.max(axis=0)
     # A tight cluster would otherwise frame to a zero-width window. The pad is
@@ -219,8 +212,179 @@ def _frame_for(hits_payload, method: str, dims: str,
     # a sensible window.
     pad_x = max((x1 - x0) * 0.6, 0.35)
     pad_y = max((y1 - y0) * 0.6, 0.35)
-    return [float(x0 - pad_x), float(x1 + pad_x),
-            float(y0 - pad_y), float(y1 + pad_y)]
+    return _clamped_to_corpus(
+        [float(x0 - pad_x), float(x1 + pad_x),
+         float(y0 - pad_y), float(y1 + pad_y)], coords)
+
+
+def _clamped_to_corpus(window, coords):
+    """Never frame wider than the corpus itself.
+
+    A pad that is a share of the span is right for a retrieval's handful of
+    neighbouring points and wrong for a set that spans the map: 60% either side
+    of a spread set asks for a window larger than everything there is, so the
+    "frame" zooms *out* and the user ends up seeing less than they started
+    with. It is reachable from both callers - an OSDR study is drawn from one
+    experiment but not from one region.
+
+    Measured on the real corpus before this guard existed: OSD-457's 192
+    samples framed to **1.22x** the corpus width and GSE228590's 8,764 to
+    **1.03x**, against 0.02x for a typical study and 0.06x for a typical
+    series. Clamping each edge to the corpus keeps a spread set framed at
+    exactly the whole map, which is the honest answer for a set that really is
+    everywhere, and leaves every compact set untouched.
+    """
+    x0, x1, y0, y1 = window
+    return [float(max(x0, coords[:, 0].min())), float(min(x1, coords[:, 0].max())),
+            float(max(y0, coords[:, 1].min())), float(min(y1, coords[:, 1].max()))]
+
+
+def _frame_for(hits_payload, method: str, dims: str,
+               roles: tuple[str, ...] = (ROLE_A, ROLE_B)):
+    """The retrieval's framing: the query and every hit that is ticked.
+
+    Frames what is actually drawn, so a comparison with one arm hidden frames
+    the arm on screen rather than a window sized for both.
+    """
+    overlay = _retrieval_overlay(hits_payload, roles)
+    if overlay is None:
+        return None
+    points = list(overlay["hit_points"])
+    if overlay["query_point"] is not None:
+        points.append(overlay["query_point"])
+    return frame_points(points, method, dims)
+
+
+def find_status_children(found: dict | None):
+    """What the find box says under itself, and it is four different sentences.
+
+    A miss is not one outcome. Answering "liver" and "GSM999999999" with the
+    same "not found" tells the first user their search is broken when the truth
+    is that they wanted a different control, and tells the second nothing about
+    whether this machine could have looked it up at all. Each reason
+    `manifold/find.py` distinguishes gets its own answer, and the two that are
+    fixable say what to do.
+
+    The no-metadata sentence is `colorby.ARCHS4_META_HINT` rather than a second
+    copy of it, so the two controls that depend on that optional join cannot
+    end up naming two different commands.
+    """
+    if not found:
+        return ""
+    reason = found.get("reason") or ""
+    label = str(found.get("label") or "")
+
+    if not reason:
+        n = len(found.get("points") or [])
+        shown = min(n, theme.FIND_MAX_MARKS)
+        head = [html.B(label), f" · {n:,} sample{'s' if n != 1 else ''}"]
+        if shown < n:
+            # The cap is stated wherever the number is, not only on the badge.
+            head.append(f", marking the first {shown:,}")
+        return head + ["."]
+
+    if reason == find.EMPTY:
+        return ""
+    if reason == find.NO_GEO_METADATA:
+        return [html.B(label), " is a GEO accession, and this machine has no "
+                "GEO metadata to look it up in. ", colorby.ARCHS4_META_HINT]
+    if reason == find.ABSENT:
+        n_archs4, n_osdr, _ = data.counts()
+        return [html.B(label), " is not on this map. It holds "
+                f"{n_archs4:,} GEO samples and the {n_osdr:,} OSDR samples "
+                "that were embedded."]
+    # find.SHAPE
+    return ["Not a study identifier. Type a GEO series (GSE143281) or an OSDR "
+            "study (OSD-100). To find a tissue or a condition instead, use ",
+            html.B("Color by"), " above."]
+
+
+def chosen_suggestion(clicks, values) -> dict | None:
+    """The click payload a suggestion row commits, or None if none was clicked.
+
+    `values` is every identifier currently on offer, in the order Dash reports
+    their clicks, so the chosen one is read positionally from the family that
+    actually fired rather than from a separately-stored list that a re-render
+    could have replaced.
+
+    The `seq` is not decoration. This becomes a store, and Dash fires a callback
+    on a store only when its value *changes* - so choosing GSM4256053, clearing
+    the box, and choosing GSM4256053 again would write an identical payload the
+    second time and commit nothing. The running click total makes every choice a
+    distinct value, including a repeat of the last one.
+    """
+    triggered = ctx.triggered_id
+    if not isinstance(triggered, dict) or triggered.get("type") != "find-suggestion":
+        return None
+    total = sum(n or 0 for n in (clicks or []))
+    if not total:
+        return None
+    return {"value": str(triggered.get("value") or ""), "seq": total}
+
+
+def _fired(prop: str) -> bool:
+    """Did `prop` actually change in the request that woke this callback?
+
+    `ctx.triggered_id` names one trigger and says nothing about *why* the
+    callback ran, and "why" is the whole question for a callback with a
+    per-keystroke input among its dependencies. Dash wakes a callback whenever
+    any of its inputs is re-rendered, appears, or disappears - measured here: a
+    `fill("")` that empties the suggestion family woke `resolve_find` with no
+    click and no submit, and it committed the empty box, wiping the marks from
+    a search the reader had not touched.
+
+    So the commit is gated on the prop having a value in `ctx.triggered` rather
+    than on the absence of other explanations. `value is not None` is what
+    separates a real event from a component Dash is merely reporting as new.
+    """
+    return any(t.get("prop_id") == prop and t.get("value") is not None
+               for t in (ctx.triggered or []))
+
+
+def viewport_axes(vp, dims: str) -> dict:
+    """The axis layout that puts `vp` on screen, or the whole corpus back.
+
+    **The `autorange` branch is not a no-op and must not be dropped.**
+    `theme.base_figure_layout` sets `uirevision="keep"`, which asks Plotly to
+    preserve the user's own pan and zoom across a figure update unless the
+    incoming figure *changes* the attribute in question. Framing works on that
+    rule: it sets a range where the previous figure had none. Resetting has to
+    go the other way, and an absent key is not a changed value - leaving the
+    range off and expecting Plotly to autorange leans on the one thing
+    `uirevision` exists to prevent. Saying `autorange` outright is the only
+    honest spelling of "back to the whole map", and it is what makes the reset
+    button, a projection change and the modebar's own reset agree, since all
+    three reach `update_figure` as `viewport = None`.
+
+    3-D contributes nothing: the viewport store does not drive a `Scatter3d`
+    camera, so there is no axis to pin and none to release.
+    """
+    if dims != "2d":
+        return {}
+    if vp:
+        return {"xaxis": dict(range=[vp[0], vp[1]]),
+                "yaxis": dict(range=[vp[2], vp[3]])}
+    return {"xaxis": dict(autorange=True), "yaxis": dict(autorange=True)}
+
+
+def is_framed(viewport, dims: str) -> bool:
+    """Is the map showing a window rather than the whole corpus?
+
+    The one definition of "framed", so the button that undoes it and the
+    callback that produced it cannot disagree about when there is anything to
+    undo. It is a property of `viewport-store` alone, deliberately: framing a
+    find, framing a retrieval and the user's own scroll-zoom all end up there
+    and are the same state by the time they arrive, which is why one control
+    can reverse all three.
+
+    3-D is never framed. `frame_points` declines outright there and
+    `update_figure` passes `None` for the viewport, because pinning 2-D axis
+    ranges does nothing to a `Scatter3d` camera - the same reason both frame
+    buttons hide in 3-D. Offering a reset for a state the view cannot be in
+    would be a click with no visible effect, which is what the lasso was
+    removed for.
+    """
+    return dims == "2d" and bool(viewport)
 
 
 def coverage_children(color_by: str):
@@ -268,11 +432,12 @@ def register(app):
         Output("plot-badges", "children"),
         Output("legend", "style"),
         Output("legend-title", "children"),
-        Output("legend-search", "style"),
+        Output("legend-search-group", "style"),
         Output("legend-store", "data"),
         Output("legend-retrieval", "children"),
         Output("legend-color", "style"),
         Output("legend-corpus", "children"),
+        Output("legend-found", "children"),
         Output("coverage", "children"),
         Output("color-by-hint", "children"),
         Input("method", "value"),
@@ -287,20 +452,18 @@ def register(app):
         # the old one.
         Input("hits-store", "data"),
         Input("show-retrieval", "value"),
+        Input("find-store", "data"),
     )
     def update_figure(method, dims, color_by, layers, budget, viewport,
-                      hits_payload, show_retrieval):
+                      hits_payload, show_retrieval, found):
         vp = tuple(viewport) if viewport else None
         roles = _roles_from_checklist(show_retrieval)
         retrieval = _retrieval_overlay(hits_payload, roles) if roles else None
         fig, legend_data, badges = render.build_figure(
             method, dims, color_by, layers or [], budget,
-            vp if dims == "2d" else None, retrieval=retrieval)
+            vp if dims == "2d" else None, retrieval=retrieval, found=found)
         legend_data["title"] = layout.color_by_label(color_by)
-        # Persist zoom in 2D by pinning axis ranges to the viewport.
-        if vp and dims == "2d":
-            fig.update_layout(xaxis=dict(range=[vp[0], vp[1]]),
-                              yaxis=dict(range=[vp[2], vp[3]]))
+        fig.update_layout(**viewport_axes(vp, dims))
         badge_children = [_badge(b) for b in badges]
         items = legend_data.get("items", [])
 
@@ -310,18 +473,20 @@ def register(app):
         key = layout.retrieval_key_children(
             _retrieval_overlay(hits_payload), roles, dims)
         corpus = layout.corpus_key_children(layers)
+        found_key = layout.found_key_children(found)
 
         # The panel is shown when any section has content. It used to hang off
         # the color items alone, so an OSDR-only field with the OSDR layer
         # unticked took the whole key off screen - and would now take a drawn
         # retrieval's key with it.
-        legend_style = {} if (items or key or corpus) else {"display": "none"}
+        legend_style = ({} if (items or key or corpus or found_key)
+                        else {"display": "none"})
         color_style = {} if items else {"display": "none"}
         search_style = ({} if len(items) >= LEGEND_SEARCH_MIN_ITEMS
                         else {"display": "none"})
         title = f"Color · {legend_data['title']}"
         return (fig, badge_children, legend_style, title, search_style,
-                legend_data, key, color_style, corpus,
+                legend_data, key, color_style, corpus, found_key,
                 coverage_children(color_by), colorby.get(color_by).hint)
 
     @app.callback(
@@ -359,37 +524,163 @@ def register(app):
         return layout.projection_params_children(method, dims)
 
     @app.callback(
-        Output("picked-group", "style"),
-        Output("picked-label", "children"),
-        Output("picked-link", "href"),
-        Input("manifold-graph", "clickData"),
+        Output("find-input", "value"),
+        Output("find-chosen", "data"),
+        Input({"type": "find-suggestion", "value": ALL}, "n_clicks"),
+        State({"type": "find-suggestion", "value": ALL}, "id"),
+        prevent_initial_call=True,
     )
-    def pick_osdr_point(click_data):
-        """Offer a retrieval for a clicked OSDR point.
+    def choose_suggestion(clicks, ids):
+        """A row was clicked: put it in the box, and publish it as a commit.
+
+        **This callback exists so that the commit does not.** A pattern-matching
+        `ALL` input fires whenever its family is *re-rendered*, and this family
+        re-renders on every keystroke - so a callback carrying both this input
+        and the search would be woken constantly with nothing to do. That is not
+        merely wasteful, it is a lost search: Dash discards the response to a
+        request that a newer request for the same callback has superseded, and
+        the keystroke-driven no-op reliably overtook the Enter that had already
+        been answered correctly on the server. Measured on the real app - the
+        first find of every session vanished, the rest survived on timing alone.
+
+        So the family's input lives here, where being woken spuriously costs a
+        `no_update` on a store nobody redraws, and `find-store` is written by a
+        callback with no per-keystroke input at all.
+        """
+        chosen = chosen_suggestion(clicks, ids)
+        if chosen is None:
+            return no_update, no_update
+        return chosen["value"], chosen
+
+    @app.callback(
+        Output("find-store", "data"),
+        # The two events `debounce=True` used to fire on, now named outright
+        # because the input publishes its value on every keystroke and only
+        # these mean "I have finished". Committing here rather than on `value`
+        # is what keeps a 942,563-point figure from being rebuilt per letter.
+        Input("find-input", "n_submit"),
+        Input("find-input", "n_blur"),
+        # The third way to finish, arriving as a store rather than as the click
+        # itself - see `choose_suggestion` for why that indirection is the whole
+        # point. Every input here changes only when someone has actually
+        # finished, so this callback is never woken with nothing to do and can
+        # never be superseded by its own no-op.
+        Input("find-chosen", "data"),
+        State("find-input", "value"),
+        prevent_initial_call=True,
+    )
+    def resolve_find(_submits, _blurs, chosen, typed):
+        """Turn what was committed into the points it names.
+
+        One writer for `find-store`, three ways to reach it, and the three
+        cannot disagree: each hands the same `find.find` the same kind of
+        string, so a chosen suggestion resolves exactly as if it had been typed.
+
+        A chosen row commits its own identifier rather than the box's current
+        text, because the text is put there by a different callback and this
+        must not depend on having won a race with it.
+
+        The default is `no_update`: a commit is positively identified rather
+        than inferred from the absence of other explanations, because Dash also
+        wakes a callback when an input component newly appears - which is how
+        clearing the box once wiped the marks from a search nobody had touched.
+        """
+        if _fired("find-chosen.data") and chosen:
+            return find.find(str(chosen.get("value") or ""))
+        if _fired("find-input.n_submit") or _fired("find-input.n_blur"):
+            return find.find(typed)
+        return no_update
+
+    @app.callback(
+        Output("find-suggestions", "children"),
+        Input("find-input", "value"),
+    )
+    def offer_suggestions(query):
+        """Complete the identifier being typed, on every keystroke.
+
+        Cheap enough to run per keystroke and measured rather than assumed: a
+        warm accession lookup is a handful of `searchsorted` calls over the
+        int32 index, about 2 ms, and the OSDR side is a scan of 2,108 strings.
+        The one expensive call is the first, which builds the 460 ms index -
+        the same build the first search has always paid for, now paid a few
+        keystrokes earlier.
+        """
+        return layout.suggestion_children(find.suggest(query))
+
+    @app.callback(
+        Output("find-status", "children"),
+        Output("frame-find", "style"),
+        Input("find-store", "data"),
+        Input("dims", "value"),
+    )
+    def describe_the_find(found, dims):
+        """The sentence under the box, and whether framing is on offer.
+
+        Framing is a button and never automatic, which is the rule
+        `frame_points` was already written to and the frame-retrieval button
+        already follows. Two reasons, and the second is the stronger. A found
+        set can span the map - an OSDR study's 192 samples framed to 1.22x the
+        corpus before the clamp went in - so "framing" it would zoom the user
+        *out*, silently, as the result of typing. And a 2-D neighbourhood is not
+        a similarity neighbourhood on this map: its 20 nearest points overlap
+        the true cosine top-20 by a median of 0, so dropping someone into a
+        zoomed view of their sample's surroundings invites reading those
+        surroundings as related when they are not. Marking answers "where is
+        it"; zooming asserts something further, so it waits to be asked for.
+
+        Hidden in 3-D for the reason the retrieval's frame button is: framing
+        pins the 2-D axis ranges and the 3-D camera ignores them, so the button
+        would be a click with no visible effect.
+        """
+        offer = bool(found and found.get("points")) and dims == "2d"
+        return find_status_children(found), ({} if offer else {"display": "none"})
+
+    @app.callback(
+        Output("picked-group", "style"),
+        Output("picked-group", "children"),
+        Input("manifold-graph", "clickData"),
+        Input("find-store", "data"),
+    )
+    def select_point(click_data, found):
+        """Describe whatever is selected, however it was selected.
+
+        One writer, two entry points. Clicking an OSDR diamond and finding a
+        sample are the same question - what is this - so they share a panel
+        rather than growing a second one beside it.
+
+        A click and a find end in the same record builder: the overlay's
+        customdata already carries the sample key, and `find.osdr_sample(key)`
+        resolves exactly that to exactly that point, in the shape `find.find`
+        returns. So there is one record builder and one panel instead of two of
+        each drifting apart.
+
+        It is `osdr_sample` rather than `find` because the box takes studies
+        only. A diamond on screen is an unambiguous reference to one sample, so
+        clicking it is not the free-text problem the typed grammar refuses - but
+        it is not something the box offers either, and the two entry points
+        should not pretend otherwise.
 
         Only the OSDR overlay carries customdata - the ARCHS4 cloud has none,
         deliberately, because 940,455 rows of it cost about 600 KB of dead
-        payload per figure. So a click that returns no customdata is a click on
-        the cloud, and nothing is offered rather than something being guessed.
-
-        The link goes to `/?q=<sample_id>` rather than mutating a store,
-        because it is a navigation: it should be a real link that middle-clicks
-        into a new tab and shows its destination on hover.
+        payload per figure. A click returning none is a click on the cloud, and
+        the *find* result stays on screen rather than being cleared by it: a
+        stray click on empty space should not wipe the panel describing what the
+        user just searched for.
         """
-        points = (click_data or {}).get("points") or []
-        custom = points[0].get("customdata") if points else None
-        if not custom:
-            return {"display": "none"}, "", "/"
-        sample_key = str(custom[0])
-        # An OSDR key is "<accession>|<sample name>". Anything else is not one.
-        if "|" not in sample_key:
-            return {"display": "none"}, "", "/"
-        study, name = sample_key.split("|", 1)
-        return (
-            {},
-            [html.B(name), html.Span(f"  ·  {study}", className="bm-picked-study")],
-            f"/?q={quote(sample_key)}",
-        )
+        if ctx.triggered_id == "manifold-graph":
+            points = (click_data or {}).get("points") or []
+            custom = points[0].get("customdata") if points else None
+            key = str(custom[0]) if custom else ""
+            # An OSDR key is "<accession>|<sample name>". Anything else is not
+            # one, and a click on the cloud is not a selection at all.
+            found = find.osdr_sample(key) if "|" in key else None
+            if found is None:
+                return no_update, no_update
+
+        record = find.describe(found)
+        if not record:
+            return {"display": "none"}, []
+        return {}, layout.selected_panel_children(record)
 
     @app.callback(
         Output("retrieval-group", "style"),
@@ -470,9 +761,9 @@ def register(app):
         shown = [c for c in full["cohorts"] if c["role"] in roles]
         if not shown:
             # The tick hides the overlay outright, and saying so is the whole
-            # job of this line. It used to describe the retrieval regardless,
-            # so unticking left the rail asserting glyphs "drawn where they sit
-            # in the space" over a map with none of them on it.
+            # job of this line. It used to describe the retrieval regardless, so
+            # unticking left the rail describing marks over a map with none of
+            # them on it.
             return ("Not drawn. Tick it above to put it back on the map."
                     if len(full["cohorts"]) < 2 else
                     "Neither arm is drawn. Tick one to put it back on the map.")
@@ -480,10 +771,16 @@ def register(app):
         if len(full["cohorts"]) < 2:
             n = len(set(full["hit_points"]))
             query = full["query_label"] or "an OSDR sample"
+            # The sentence used to carry a trailing clause about the marks
+            # sitting where they do in the space, which narrated the picture the
+            # reader is already looking at rather than telling them anything
+            # about it. Removed on 2026-08-11; the count is the part that
+            # carries information, so the sentence stops after it. The phrase is
+            # pinned in `tests/test_app.py::REMOVED_COPY`, which is why it is
+            # described here rather than quoted.
             return [
                 html.B(query.split("|")[-1]),
-                f" and its {n} nearest ARCHS4 neighbor{'s' if n != 1 else ''}, "
-                "drawn where they sit in the space.",
+                f" and its {n} nearest ARCHS4 neighbor{'s' if n != 1 else ''}.",
             ]
 
         if len(shown) < 2:
@@ -512,7 +809,17 @@ def register(app):
         # Two callbacks writing one Output is a race Dash only sometimes
         # rejects, and `test_every_output_has_exactly_one_writer` pins it.
         Input("frame-retrieval", "n_clicks"),
+        # Framing a find is the same kind of event as framing a retrieval, so it
+        # arrives at the callback that already owns the viewport rather than
+        # becoming a second writer to it.
+        Input("frame-find", "n_clicks"),
+        # And so does undoing any of it. One store holds the framing, whoever
+        # narrowed it, so one Input clears it - rather than a reset handler per
+        # frame button, which would be two ways to write one value and would
+        # still leave a plain scroll-zoom with no way back.
+        Input("reset-view", "n_clicks"),
         State("hits-store", "data"),
+        State("find-store", "data"),
         State("method", "value"),
         State("dims", "value"),
         # Frame what is actually on screen: with one arm of a comparison
@@ -520,20 +827,49 @@ def register(app):
         State("show-retrieval", "value"),
         prevent_initial_call=True,
     )
-    def update_viewport(relayout, method, dims, _frame_clicks, hits_payload,
-                        method_state, dims_state, show_retrieval):
+    def update_viewport(relayout, method, dims, _frame_clicks, _find_clicks,
+                        _reset_clicks, hits_payload, found, method_state,
+                        dims_state, show_retrieval):
         from dash import ctx
-        if ctx.triggered_id in ("method", "dims"):
-            return None  # reset zoom when the projection changes
+        if ctx.triggered_id in ("method", "dims", "reset-view"):
+            # None is this callback's word for the whole corpus, so the reset
+            # button lands in the same branch a projection change does. It
+            # clears the viewport and nothing else: the find, the retrieval, the
+            # selected sample and the ticks above them are all other stores, so
+            # the query a user framed is still there to be framed again.
+            return None
         if ctx.triggered_id == "frame-retrieval":
             roles = _roles_from_checklist(show_retrieval) or (ROLE_A, ROLE_B)
             return _frame_for(hits_payload, method_state, dims_state, roles)
+        if ctx.triggered_id == "frame-find":
+            # `no_update`, never None. None is this callback's "reset to the
+            # whole corpus", so a frame click with nothing found - or in 3-D,
+            # where frame_points declines - would zoom the user out instead of
+            # doing nothing.
+            window = frame_points((found or {}).get("points"),
+                                  method_state, dims_state)
+            return window if window else no_update
         vp = _viewport_from_relayout(relayout)
         if vp == "unchanged":
             return no_update
         if vp is None:
             return None
         return list(vp)
+
+    @app.callback(
+        Output("view-group", "style"),
+        Input("viewport-store", "data"),
+        Input("dims", "value"),
+    )
+    def show_reset_view(viewport, dims):
+        """Offer the reset only while there is something to reset.
+
+        A permanently visible "Reset view" over an unframed map is a control
+        that does nothing, which is the standard this map already applies to the
+        two frame buttons and to the selection tools it removed from the
+        modebar.
+        """
+        return {} if is_framed(viewport, dims) else {"display": "none"}
 
     @app.callback(
         Output("legend-list", "children"),
