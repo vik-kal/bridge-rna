@@ -905,10 +905,8 @@ def register(app) -> None:
                     list(other.members), topk=int(topk))
                 other_geometry = C.cohort_geometry(list(other.members), other_rows)
             
-            #save the hits to archs4 metadata for clustering (for now)
-          
-            hits_df.to_csv(f"archs4metadata/{cohort.cohort_id}_hits.csv")
-            hits_df.to_parquet( f"archs4metadata/{cohort.cohort_id}_hits.parquet")
+            
+
         except Exception as exc:
             detail = getattr(exc, "detail", "") or _safe_str(exc)
             return (
