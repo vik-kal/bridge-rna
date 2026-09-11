@@ -6,7 +6,7 @@ from functools import reduce
 import pandas as pd
 import time
 import os
-import chime
+
 
 # Hardcode the study you want
   
@@ -38,12 +38,13 @@ def run_cohort_dataframing(study_id): #returns a dataframe with the topk hits fo
         hits_df = _enrich_hits_from_ncbi_eutils(hits_df, email_value)
     
 
-        altered_df = hits_df[['gsm','gse','geo_summary']].copy()
-        altered_df['spaceflight'] = cohort.label
+        #altered_df = hits_df[['gsm','gse','geo_summary']].copy()
+        #altered_df = hits_df.copy()
+        hits_df['spaceflight'] = cohort.label
 
 
 
-        df_list.append(altered_df)
+        df_list.append(hits_df)
 
         #print(altered_df.head())  # preview altered dataframe
     #merge the dataframes for all cohort_options while making the cohort facet grouping as a new column
@@ -63,13 +64,13 @@ def loop_all_cohorts():
     for study in all_studies:
         merged_data = run_cohort_dataframing(study)
         if not merged_data.empty:
-            merged_data.to_csv( f"archs4metadata_cohort/{study}_hits.csv")
+            merged_data.to_csv( f"archs4metadata_cohort_noncbi/{study}_hits.csv")
 
 def test_one_cohort(study):
        
     merged_data = run_cohort_dataframing(study)
     if not merged_data.empty:
-        merged_data.to_csv( f"archs4metadata_cohort/{study}_hits.csv")
+        merged_data.to_csv( f"archs4metadata_cohort_noncbi/{study}_hits.csv")
 
 if __name__ == "__main__":
     start = time.time()

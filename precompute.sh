@@ -1,6 +1,6 @@
 #!/bin/bash
 #precompute.sh
-source venv/bin/activate
+#source venv/bin/activate
 
 
 python precompute/embed_osdr.py                              # NASA embeddings. Hours; resumable.
