@@ -2,10 +2,12 @@ from bridge_rna import cohorts as C
 from bridge_rna.retrieval import run_cohort_retrieval
 from bridge_rna.geo import _enrich_hits_from_ncbi_eutils
 from bridge_rna.layout import samples_df
-from functools import reduce
+from demo_osdr_top5 import fetch_archs4_metadata
 import pandas as pd
+from pathlib import Path
 import time
 import os
+
 
 
 # Hardcode the study you want
@@ -55,6 +57,24 @@ def run_cohort_dataframing(study_id): #returns a dataframe with the topk hits fo
     
     return merged_df
     
+def add_metadata_to_hits():
+    human_archs4_path = Path('/media/volume/H5-Files/archs4/human_gene_v2.latest.h5')
+    mouse_archs4_path = Path('/media/volume/H5-Files/archs4/mouse_gene_v2.latest.h5')
+
+    hit_path = Path('archs4metadata_cohort_noncbi')
+    
+    for f in hit_path.iterdir():
+        if str(f).endswith('.csv'):
+            daf = pd.read_csv(f) #test with one first
+            geo_list = daf['gsm'].tolist()
+            metadata_df = fetch_archs4_metadata(geo_list,human_archs4_path,mouse_archs4_path)
+            daf['characteristics'] = metadata_df['characteristics_ch1']
+           
+            
+            daf.to_csv(f, index=False)
+            print(f"Saved:{f}")
+
+
 
 
 def loop_all_cohorts():
@@ -74,7 +94,8 @@ def test_one_cohort(study):
 
 if __name__ == "__main__":
     start = time.time()
-    loop_all_cohorts()
+    #loop_all_cohorts()
+    add_metadata_to_hits()
     #print('hi')
     #test_one_cohort("OSD-141")
     

@@ -489,9 +489,11 @@ def fetch_archs4_metadata(geo_accessions: list, human_h5: Path, mouse_h5: Path |
         if not remaining:
             break
         if h5_path is None or not h5_path.exists():
+            print("FLop")
             continue
         try:
             df = a4.meta.samples(str(h5_path), remaining)
+            #print(df)
             if isinstance(df, pd.DataFrame) and not df.empty:
                 df["species"] = species_label
                 frames.append(df)
