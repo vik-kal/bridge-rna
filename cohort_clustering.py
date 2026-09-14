@@ -33,6 +33,7 @@ def run_cohort_dataframing(study_id): #returns a dataframe with the topk hits fo
             continue
 
         members = list(cohort.members)
+        print(cohort.members)
         #print(cohort.label)
 
 
@@ -75,7 +76,9 @@ def add_metadata_to_hits():
             print(f"Saved:{f}")
 
 
-
+def get_cohort_members(study): # returns a list of cohort members in each group
+    
+    pass
 
 def loop_all_cohorts():
 
@@ -89,15 +92,19 @@ def loop_all_cohorts():
 def test_one_cohort(study):
        
     merged_data = run_cohort_dataframing(study)
-    if not merged_data.empty:
-        merged_data.to_csv( f"archs4metadata_cohort_noncbi/{study}_hits.csv")
+
+    #if not merged_data.empty:
+        #merged_data.to_csv( f"archs4metadata_cohort_noncbi/{study}_hits.csv")
+
+
+
 
 if __name__ == "__main__":
     start = time.time()
     #loop_all_cohorts()
-    add_metadata_to_hits()
+    #add_metadata_to_hits()
     #print('hi')
-    #test_one_cohort("OSD-141")
+    test_one_cohort("OSD-244")
     
     end = time.time()
     print("Execution time:", end - start, "seconds")
