@@ -1,19 +1,21 @@
 from bridge_rna import cohorts as C
 from bridge_rna.retrieval import run_cohort_retrieval
 from bridge_rna.geo import _enrich_hits_from_ncbi_eutils
+from bridge_rna.retrieval import run_cached_query_retrieval
 from bridge_rna.layout import samples_df
 from demo_osdr_top5 import fetch_archs4_metadata
 import pandas as pd
 from pathlib import Path
 import time
 import os
+from collections import defaultdict
 
 
 
 # Hardcode the study you want
   
 topk = 10    
-email_value = "kalahasthivikasni@gmail.com"      
+email_value = ""    
 
 
 def run_cohort_dataframing(study_id): #returns a dataframe with the topk hits for space and ground, combined into one df
@@ -57,7 +59,20 @@ def run_cohort_dataframing(study_id): #returns a dataframe with the topk hits fo
         #print(merged_df)
     
     return merged_df
-    
+
+def run_alt_cohort_dataframing(study_id):
+    merged_df = pd.DataFrame()
+    df_list = []
+    cohort_dict = get_cohort_members(study_id)
+
+    test = run_cached_query_retrieval('OSD-244|Mmus_C57-6T_TMS_GC_LAR_Rep8_G9',10)
+    test = _enrich_hits_from_ncbi_eutils
+    print(test)
+
+
+
+
+
 def add_metadata_to_hits():
     human_archs4_path = Path('/media/volume/H5-Files/archs4/human_gene_v2.latest.h5')
     mouse_archs4_path = Path('/media/volume/H5-Files/archs4/mouse_gene_v2.latest.h5')
@@ -76,9 +91,28 @@ def add_metadata_to_hits():
             print(f"Saved:{f}")
 
 
-def get_cohort_members(study): # returns a list of cohort members in each group
+def get_cohort_members(study_id): # returns a dict of cohort members in each group
+
+        member_dict = defaultdict(list)
+        facets = ['study','spaceflight']
+        cohort_list = C.build_cohorts(facets=facets, study=study_id)
     
-    pass
+        print(f"Found {len(cohort_list)} cohorts for study {study_id} with facets {facets}")
+    
+    
+        df_list = []
+        merged_df = pd.DataFrame()  # Initialize an empty DataFrame to hold merged results
+        # Loop through each cohort and retrieve hits
+        for cohort in cohort_list:
+            if cohort.size < C.MIN_COHORT_SIZE:
+                print(f"Skipping cohort {cohort.label}: only {cohort.size} sample(s)")
+                continue
+    
+            members = list(cohort.members)
+            member_dict[cohort.label] = members
+        return member_dict
+
+
 
 def loop_all_cohorts():
 
@@ -104,7 +138,9 @@ if __name__ == "__main__":
     #loop_all_cohorts()
     #add_metadata_to_hits()
     #print('hi')
-    test_one_cohort("OSD-244")
+    #test_one_cohort("OSD-244")
+    #print(get_cohort_members("OSD-244"))
+    print(run_alt_cohort_dataframing("OSD-244"))
     
     end = time.time()
     print("Execution time:", end - start, "seconds")
