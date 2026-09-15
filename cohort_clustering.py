@@ -15,7 +15,8 @@ from collections import defaultdict
 # Hardcode the study you want
   
 topk = 10    
-email_value = ""    
+
+email_value = os.getenv("email_value")
 
 
 def run_cohort_dataframing(study_id): #returns a dataframe with the topk hits for space and ground, combined into one df
@@ -65,10 +66,24 @@ def run_alt_cohort_dataframing(study_id):
     df_list = []
     cohort_dict = get_cohort_members(study_id)
 
-    test = run_cached_query_retrieval('OSD-244|Mmus_C57-6T_TMS_GC_LAR_Rep8_G9',10)
-    test = _enrich_hits_from_ncbi_eutils
-    print(test)
+    #test_dict = {'space':['OSD-244|Mmus_C57-6T_TMS_BSL_ISS-T_Rep2_B2','OSD-244|Mmus_C57-6T_TMS_GC_LAR_Rep8_G9']}
+    
 
+    for k,v in cohort_dict.items():
+
+        for sample_name in v:
+            hits_df = run_cached_query_retrieval(sample_name,10)
+            hits_df = _enrich_hits_from_ncbi_eutils(hits_df,email_value)
+            hits_df['sample_name'] = sample_name
+            hits_df['spaceflight'] = k
+
+            #add to df_list to merge
+            df_list.append(hits_df)
+        
+    if df_list:
+            merged_df = pd.concat(df_list,ignore_index=True)    
+
+    return merged_df
 
 
 
@@ -119,28 +134,28 @@ def loop_all_cohorts():
     all_studies = samples_df["study_id"].unique()
 
     for study in all_studies:
-        merged_data = run_cohort_dataframing(study)
+        merged_data = run_alt_cohort_dataframing(study)
         if not merged_data.empty:
-            merged_data.to_csv( f"archs4metadata_cohort_noncbi/{study}_hits.csv")
+            merged_data.to_csv( f"archs4data/archs4hitscohort_alt_pre/{study}_hits.csv")
 
 def test_one_cohort(study):
        
-    merged_data = run_cohort_dataframing(study)
+    merged_data = run_alt_cohort_dataframing(study)
 
-    #if not merged_data.empty:
-        #merged_data.to_csv( f"archs4metadata_cohort_noncbi/{study}_hits.csv")
+    if not merged_data.empty:
+        merged_data.to_csv( f"archs4data/archs4hitscohort_alt_pre/{study}_hits.csv")
 
 
 
 
 if __name__ == "__main__":
     start = time.time()
-    #loop_all_cohorts()
+    loop_all_cohorts()
     #add_metadata_to_hits()
     #print('hi')
-    #test_one_cohort("OSD-244")
+    #test_one_cohort("OSD-464")
     #print(get_cohort_members("OSD-244"))
-    print(run_alt_cohort_dataframing("OSD-244"))
+    #print(run_alt_cohort_dataframing("OSD-244"))
     
     end = time.time()
     print("Execution time:", end - start, "seconds")
