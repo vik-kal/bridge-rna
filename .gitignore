@@ -4,7 +4,7 @@
 !.env.example
 
 # Python environments and generated files
-jupyter-env
+jupyter-env/
 .venv/
 venv/
 env/
@@ -14,6 +14,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+ipynb_checkpoints
 
 # Local editor/assistant state
 .claude/
@@ -30,6 +31,9 @@ Desktop.ini
 # Generated local output
 reports/
 *.log
+
+#h5 files
+archs4h5/
 
 # Manifold precompute artifacts. Everything under cache/ is reproducible from
 # the precompute scripts and is too large to track: the OSDR expression matrix
